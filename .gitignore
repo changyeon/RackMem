@@ -50,3 +50,10 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# misc
+*.swp
+compile_commands.json
+.cache
+build
+*.sh
