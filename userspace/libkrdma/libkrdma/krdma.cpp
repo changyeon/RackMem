@@ -30,20 +30,6 @@ out:
     return ret;
 }
 
-int libkrdma::libkrdma_accept(std::string &server, int port)
-{
-    int ret = 0;
-    libkrdma::krdma_message_ioctl msg;
-
-    memset(&msg, 0, sizeof(msg));
-    server.copy(msg.addr, server.size(), 0);
-    msg.port = port;
-
-    ret = libkrdma_ioctl(KRDMA_IOCTL_ACCEPT, &msg);
-
-    return ret;
-}
-
 int libkrdma::libkrdma_connect(std::string &server, int port)
 {
     int ret = 0;

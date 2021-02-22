@@ -25,7 +25,7 @@ static int handle_join_cluster(int fd, std::string &server)
 
     write(fd, &msg, sizeof(msg));
 
-    libkrdma::libkrdma_accept(addr, msg.port);
+    //libkrdma::libkrdma_accept(addr, msg.port);
 
     msg.cmd = KRDMA_CMD_EOF;
     write(fd, &msg, sizeof(msg));

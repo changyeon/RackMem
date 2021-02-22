@@ -1,39 +1,32 @@
 #ifndef _INCLUDE_KRDMA_H_
 #define _INCLUDE_KRDMA_H_
 
+extern int g_debug;
+
 #define DEBUG_LOG if (g_debug) pr_info
 
 #include <rdma/rdma_cm.h>
+#include <linux/ioctl.h>
+#include <linux/completion.h>
 
-enum cm_state {
-    CM_STATE_IDLE,
-    CM_STATE_CONNECT_REQUEST,
-    CM_STATE_ADDR_RESOLVED,
-    CM_STATE_ROUTE_RESOLVED,
-    CM_STATE_CONNECTED,
-    CM_STATE_DISCONNECTED,
-    CM_STATE_ERROR
+enum krdma_conn_state {
+    CONN_STATE_IDLE,
+    CONN_STATE_CONNECTED
 };
 
-struct krdma_cb {
-    int server;
-    enum cm_state state;
-
+struct krdma_conn {
+    int state;
     struct rdma_cm_id *cm_id;
-    struct rdma_cm_id *cm_id_child;
-    struct ib_cq *cq;
     struct ib_pd *pd;
+    struct ib_cq *cq;
     struct ib_qp *qp;
-    struct ib_mr *mr;
-
-    spinlock_t lock;
-    wait_queue_head_t sem;
-
+    int cm_error;
+    struct completion cm_done;
 };
 
-struct krdma_cb *krdma_accept(char *server, int port);
-struct krdma_cb *krdma_connect(char *server, int port);
-void krdma_disconnect(struct krdma_cb *cb);
+int krdma_cm_connect(char *server, int port);
+int krdma_cm_setup(char *server, int port, void *context);
+void krdma_cm_cleanup(void);
 void krdma_test(void);
 
 // RDMA APIs

@@ -4,9 +4,8 @@
 #include <string>
 #include <sys/ioctl.h>
 
-#define KRDMA_IOCTL_ACCEPT          _IO(0xF7, 1)
-#define KRDMA_IOCTL_CONNECT         _IOW(0xF7, 2, libkrdma::krdma_message_ioctl)
-#define KRDMA_IOCTL_DISCONNECT      _IO(0xF7, 3)
+#define KRDMA_IOCTL_CONNECT         _IOW(0xF7, 1, libkrdma::krdma_message_ioctl)
+#define KRDMA_IOCTL_DISCONNECT      _IO(0xF7, 2)
 
 #define KRDMA_CMD_JOIN_CLUSTER      1
 #define KRDMA_CMD_LEAVE_CLUSTER     2

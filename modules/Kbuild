@@ -8,4 +8,4 @@ rack_block-y := rack_block/block.o
 
 rack_dvs-y := rack_dvs/dvs.o
 
-krdma-y := krdma/krdma.o krdma/dbgfs.o krdma/comm.o
+krdma-y := krdma/krdma.o krdma/cm.o krdma/ioctl.o krdma/dbgfs.o
