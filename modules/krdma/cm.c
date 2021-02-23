@@ -7,6 +7,7 @@
 #include <linux/hashtable.h>
 #include <linux/completion.h>
 #include <linux/jiffies.h>
+#include <linux/dma-mapping.h>
 
 #include <krdma.h>
 
@@ -27,25 +28,48 @@ static void krdma_cq_event_handler(struct ib_event *event, void *ctx)
     DEBUG_LOG("cq_event_handler: (%s, %p)\n", ib_event_msg(event->event), ctx);
 }
 
+static int krdma_poll_cq_one(struct krdma_conn *conn)
+{
+    int ret = 0;
+    struct ib_wc wc;
+
+    while (true) {
+        ret = ib_poll_cq(conn->cq, 1, &wc);
+        if (ret < 0)
+            pr_err("error on ib_poll_cq: (%d, %d)\n", ret, wc.status);
+        if (ret == 1) {
+            DEBUG_LOG("poll cq successful\n");
+            break;
+        }
+    }
+
+    return 0;
+}
+
 static int allocate_qp(struct krdma_conn *conn)
 {
     struct rdma_cm_id *cm_id = conn->cm_id;
     int ret = 0;
-    int tx_depth = 1024;
-    unsigned int flags = 0;
     struct ib_cq_init_attr cq_attr;
     struct ib_qp_init_attr qp_attr;
     struct ib_device_attr *dev_attr;
 
-    conn->pd = ib_alloc_pd(cm_id->device, flags);
+    conn->pd = ib_alloc_pd(cm_id->device, IB_PD_UNSAFE_GLOBAL_RKEY);
     if (IS_ERR(conn->pd)) {
         ret = PTR_ERR(conn->pd);
         pr_err("error on ib_alloc_pd\n");
         goto out;
     }
 
+    DEBUG_LOG("local_dma_lkey: %u, unsafe_global_rkey: %u\n",
+              conn->pd->local_dma_lkey, conn->pd->unsafe_global_rkey);
+
+    conn->mr = conn->pd->__internal_mr;
+    conn->lkey = conn->pd->local_dma_lkey;
+    conn->rkey = conn->pd->unsafe_global_rkey;
+
     memset(&cq_attr, 0, sizeof(cq_attr));
-    cq_attr.cqe = tx_depth * 2;
+    cq_attr.cqe = 128;
     cq_attr.comp_vector = 0;
 
     conn->cq = ib_create_cq(cm_id->device, krdma_cq_comp_handler,
@@ -56,22 +80,28 @@ static int allocate_qp(struct krdma_conn *conn)
         goto out_dealloc_pd;
     }
 
+    ret = ib_req_notify_cq(conn->cq, IB_CQ_NEXT_COMP);
+    if (ret) {
+        pr_err("error on ib_req_notify_cq\n");
+        goto out_destroy_cq;
+    }
+
     memset(&qp_attr, 0, sizeof(qp_attr));
     qp_attr.qp_context = (void *) conn;
     qp_attr.send_cq = conn->cq;
     qp_attr.recv_cq = conn->cq;
     qp_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     qp_attr.qp_type = IB_QPT_RC;
-    qp_attr.cap.max_send_wr = tx_depth;
-    qp_attr.cap.max_recv_wr = 2;
+    qp_attr.cap.max_send_wr = 64;
+    qp_attr.cap.max_recv_wr = 64;
 
     /* for flush_qp() ? */
     qp_attr.cap.max_send_wr++;
     qp_attr.cap.max_recv_wr++;
 
     dev_attr = &cm_id->device->attrs;
-    qp_attr.cap.max_recv_sge = dev_attr->max_recv_sge;
-    qp_attr.cap.max_send_sge = dev_attr->max_send_sge;
+    qp_attr.cap.max_recv_sge = 1;
+    qp_attr.cap.max_send_sge = 1;
 
     ret = rdma_create_qp(cm_id, conn->pd, &qp_attr);
     if (ret) {
@@ -102,11 +132,78 @@ static void release_qp(struct krdma_conn *conn)
     conn->pd = NULL;
 }
 
+static int setup_message_buffer(struct krdma_conn *conn)
+{
+    int ret = 0;
+    struct krdma_msg *msg;
+
+    /* setup message buffers */
+    msg = &conn->send_msg;
+    conn->send_dma_addr = ib_dma_map_single(
+            conn->pd->device, (void *) msg, sizeof(*msg), DMA_BIDIRECTIONAL);
+
+    msg = &conn->recv_msg;
+    conn->recv_dma_addr = ib_dma_map_single(
+            conn->pd->device, (void *) msg, sizeof(*msg), DMA_BIDIRECTIONAL);
+
+    DEBUG_LOG("send_dma_addr: %llu, recv_dma_addr: %llu\n",
+              conn->send_dma_addr, conn->recv_dma_addr);
+
+    conn->send_sgl.addr = conn->send_dma_addr;
+    conn->send_sgl.length = sizeof(conn->send_msg);
+    conn->send_sgl.lkey = conn->lkey;
+
+    conn->send_wr.opcode = IB_WR_SEND;
+    conn->send_wr.send_flags = IB_SEND_SIGNALED;
+    conn->send_wr.sg_list = &conn->send_sgl;
+    conn->send_wr.num_sge = 1;
+
+    conn->recv_sgl.addr = conn->recv_dma_addr;
+    conn->recv_sgl.length = sizeof(conn->recv_msg);
+    conn->recv_sgl.lkey = conn->lkey;
+
+    conn->recv_wr.sg_list = &conn->recv_sgl;
+    conn->recv_wr.num_sge = 1;
+
+    DEBUG_LOG("recv cmd: %llu, arg1: %llu, arg2: %llu, arg3: %llu\n",
+              conn->recv_msg.cmd, conn->recv_msg.arg1, conn->recv_msg.arg2,
+              conn->recv_msg.arg3);
+
+    /* setup RDMA buffer */
+    conn->rdma_buf = ib_dma_alloc_coherent(
+            conn->pd->device, PAGE_SIZE, &conn->rdma_dma_addr, GFP_KERNEL);
+    if (conn->rdma_buf == NULL) {
+        ret = -ENOMEM;
+        pr_err("failed to allocate memory for rdma_buf\n");
+        goto out_nomem;
+    }
+
+    conn->rdma_sgl.addr = conn->rdma_dma_addr;
+    conn->rdma_sgl.lkey = conn->lkey;
+    conn->rdma_sgl.length = PAGE_SIZE;
+
+    conn->rdma_wr.wr.next = NULL;
+    conn->rdma_wr.wr.wr_id = 0;
+    conn->rdma_wr.wr.sg_list = &conn->rdma_sgl;
+    conn->rdma_wr.wr.num_sge = 1;
+    conn->rdma_wr.wr.send_flags = IB_SEND_SIGNALED;
+
+    return 0;
+
+out_nomem:
+    ib_dma_unmap_single(conn->pd->device, conn->send_dma_addr,
+                        sizeof(conn->send_msg) , DMA_BIDIRECTIONAL);
+    ib_dma_unmap_single(conn->pd->device, conn->recv_dma_addr,
+                        sizeof(conn->recv_msg) , DMA_BIDIRECTIONAL);
+    return ret;
+}
+
 static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
 {
     int ret;
     struct krdma_conn *conn;
     struct rdma_conn_param param;
+    const struct ib_recv_wr *bad_wr;
 
     conn = kzalloc(sizeof(*conn), GFP_KERNEL);
     if (conn == NULL) {
@@ -125,6 +222,14 @@ static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
     }
 
     /* setup message buffer */
+    setup_message_buffer(conn);
+
+    ret = ib_post_recv(conn->qp, &conn->recv_wr, &bad_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv\n");
+        goto out_release_qp;
+    }
+    DEBUG_LOG("post recv on the server side\n");
 
     memset(&param, 0, sizeof(param));
     param.responder_resources = 1;
@@ -144,9 +249,42 @@ out:
     return ret;
 }
 
-static void krdma_cm_established_server(struct krdma_conn *conn)
+static int krdma_cm_established_server(struct krdma_conn *conn)
 {
-    /**/
+    int ret = 0;
+    const struct ib_send_wr *bad_wr;
+
+    /* poll cq one */
+    DEBUG_LOG("polling recv completion on server\n");
+    krdma_poll_cq_one(conn);
+
+    DEBUG_LOG("recv cmd: %llu, arg1: %llu, arg2: %llu, arg3: %llu\n",
+              conn->recv_msg.cmd, conn->recv_msg.arg1, conn->recv_msg.arg2,
+              conn->recv_msg.arg3);
+
+    conn->send_msg.cmd = conn->rkey;
+    conn->send_msg.arg1 = conn->rdma_dma_addr;
+    conn->send_msg.arg2 = PAGE_SIZE;
+    conn->send_msg.arg3 = 0;
+
+    /* post send */
+    DEBUG_LOG("post send request (server)\n");
+
+    ret = ib_post_send(conn->qp, &conn->send_wr, &bad_wr);
+    if (ret) {
+        pr_err("error on ib_post_send\n");
+        goto out;
+    }
+
+    DEBUG_LOG("polling send completion on server\n");
+    krdma_poll_cq_one(conn);
+
+    DEBUG_LOG("connection established (server)\n");
+
+    return 0;
+
+out:
+    return ret;
 }
 
 static int krdma_cm_handler_server(struct rdma_cm_id *cm_id,
@@ -166,7 +304,7 @@ static int krdma_cm_handler_server(struct rdma_cm_id *cm_id,
         ret = krdma_cm_connect_request(cm_id);
         break;
     case RDMA_CM_EVENT_ESTABLISHED:
-        krdma_cm_established_server(conn);
+        ret = krdma_cm_established_server(conn);
         break;
     case RDMA_CM_EVENT_ADDR_CHANGE:
     case RDMA_CM_EVENT_DISCONNECTED:
@@ -216,8 +354,17 @@ static int krdma_cm_route_resolved(struct krdma_conn *conn)
 {
     int ret;
     struct rdma_conn_param param;
+    const struct ib_recv_wr *bad_wr;
 
     /* setup message buffer */
+    setup_message_buffer(conn);
+
+    ret = ib_post_recv(conn->qp, &conn->recv_wr, &bad_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv\n");
+        goto out_destroy_qp;
+    }
+    DEBUG_LOG("post recv on the client side\n");
 
     memset(&param, 0, sizeof(param));
     param.responder_resources = 1;
@@ -241,8 +388,76 @@ out_destroy_qp:
 
 static int krdma_cm_established_client(struct krdma_conn *conn)
 {
-    /**/
+    int ret = 0;
+    const struct ib_send_wr *bad_wr;
+
+    conn->send_msg.cmd = conn->rkey;
+    conn->send_msg.arg1 = conn->rdma_dma_addr;
+    conn->send_msg.arg2 = PAGE_SIZE;
+    conn->send_msg.arg3 = 0;
+
+    /* post send request */
+    DEBUG_LOG("post send request (client)\n");
+
+    ret = ib_post_send(conn->qp, &conn->send_wr, &bad_wr);
+    if (ret) {
+        pr_err("error on ib_post_send\n");
+        goto out;
+    }
+
+    DEBUG_LOG("polling send completion on client\n");
+    krdma_poll_cq_one(conn);
+
+    /* poll cq one */
+    DEBUG_LOG("polling recv completion on client\n");
+    krdma_poll_cq_one(conn);
+
+    DEBUG_LOG("recv cmd: %llu, arg1: %llu, arg2: %llu, arg3: %llu\n",
+              conn->recv_msg.cmd, conn->recv_msg.arg1, conn->recv_msg.arg2,
+              conn->recv_msg.arg3);
+
+    DEBUG_LOG("connection established (client)\n");
+
+    DEBUG_LOG("test RDMA\n");
+
+    memset(conn->rdma_buf, 0xff, PAGE_SIZE);
+    DEBUG_LOG("%lu\n", *((unsigned long *) conn->rdma_buf));
+
+    conn->rdma_wr.remote_addr = conn->recv_msg.arg1;
+    conn->rdma_wr.rkey = conn->recv_msg.cmd;
+    conn->rdma_wr.wr.opcode = IB_WR_RDMA_WRITE;
+
+    ret = ib_post_send(conn->qp, &conn->rdma_wr.wr, &bad_wr);
+    if (ret) {
+        pr_err("error on ib_post_send\n");
+        goto out;
+    }
+
+    DEBUG_LOG("polling rdma completion on client\n");
+    krdma_poll_cq_one(conn);
+
+    memset(conn->rdma_buf, 0, PAGE_SIZE);
+    DEBUG_LOG("%lu\n", *((unsigned long *) conn->rdma_buf));
+
+    conn->rdma_wr.wr.opcode = IB_WR_RDMA_READ;
+
+    ret = ib_post_send(conn->qp, &conn->rdma_wr.wr, &bad_wr);
+    if (ret) {
+        pr_err("error on ib_post_send\n");
+        goto out;
+    }
+
+    DEBUG_LOG("polling rdma completion on client\n");
+    krdma_poll_cq_one(conn);
+
+    DEBUG_LOG("%lu\n", *((unsigned long *) conn->rdma_buf));
+
+    DEBUG_LOG("rdma read successful!\n");
+
     return 0;
+
+out:
+    return ret;
 }
 
 static int krdma_cm_conn_rejected(struct krdma_conn *conn,

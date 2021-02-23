@@ -14,14 +14,45 @@ enum krdma_conn_state {
     CONN_STATE_CONNECTED
 };
 
+struct krdma_msg {
+    u64 cmd;
+    u64 arg1;
+    u64 arg2;
+    u64 arg3;
+};
+
 struct krdma_conn {
     int state;
     struct rdma_cm_id *cm_id;
     struct ib_pd *pd;
+    struct ib_mr *mr;
     struct ib_cq *cq;
     struct ib_qp *qp;
     int cm_error;
     struct completion cm_done;
+
+    u32 lkey;
+    u32 rkey;
+
+    /* message buffers */
+    struct krdma_msg send_msg __aligned(32);
+    struct krdma_msg recv_msg __aligned(32);
+
+    u64 send_dma_addr;
+    u64 recv_dma_addr;
+
+    struct ib_sge send_sgl;
+    struct ib_sge recv_sgl;
+
+    struct ib_send_wr send_wr;
+    struct ib_recv_wr recv_wr;
+
+    /* RDMA buffers */
+    void *rdma_buf;
+    dma_addr_t rdma_dma_addr;
+
+    struct ib_sge rdma_sgl;
+    struct ib_rdma_wr rdma_wr;
 };
 
 int krdma_cm_connect(char *server, int port);
