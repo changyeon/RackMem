@@ -3,20 +3,18 @@
 #include <linux/module.h>
 #include <linux/inet.h>
 #include <linux/socket.h>
-#include <linux/mutex.h>
-#include <linux/hashtable.h>
 #include <linux/completion.h>
 #include <linux/jiffies.h>
 #include <linux/dma-mapping.h>
+#include <linux/utsname.h>
 
 #include <krdma.h>
+
+extern char g_nodename[__NEW_UTS_LEN + 1];
 
 static struct krdma_cm_context {
     struct rdma_cm_id *cm_id_server;
 } krdma_cm_context;
-
-static DEFINE_MUTEX(node_list_mutex);
-/*static DEFINE_HASHTABELE(node_hashtable);*/
 
 static void krdma_cq_comp_handler(struct ib_cq *cq, void *ctx)
 {
@@ -165,10 +163,6 @@ static int setup_message_buffer(struct krdma_conn *conn)
     conn->recv_wr.sg_list = &conn->recv_sgl;
     conn->recv_wr.num_sge = 1;
 
-    DEBUG_LOG("recv cmd: %llu, arg1: %llu, arg2: %llu, arg3: %llu\n",
-              conn->recv_msg.cmd, conn->recv_msg.arg1, conn->recv_msg.arg2,
-              conn->recv_msg.arg3);
-
     /* setup RDMA buffer */
     conn->rdma_buf = ib_dma_alloc_coherent(
             conn->pd->device, PAGE_SIZE, &conn->rdma_dma_addr, GFP_KERNEL);
@@ -249,26 +243,19 @@ out:
     return ret;
 }
 
-static int krdma_cm_established_server(struct krdma_conn *conn)
+static int krdma_cm_established(struct krdma_conn *conn)
 {
     int ret = 0;
     const struct ib_send_wr *bad_wr;
 
-    /* poll cq one */
-    DEBUG_LOG("polling recv completion on server\n");
-    krdma_poll_cq_one(conn);
-
-    DEBUG_LOG("recv cmd: %llu, arg1: %llu, arg2: %llu, arg3: %llu\n",
-              conn->recv_msg.cmd, conn->recv_msg.arg1, conn->recv_msg.arg2,
-              conn->recv_msg.arg3);
-
+    /* fill message buffer with RDMA region info */
     conn->send_msg.cmd = conn->rkey;
     conn->send_msg.arg1 = conn->rdma_dma_addr;
     conn->send_msg.arg2 = PAGE_SIZE;
     conn->send_msg.arg3 = 0;
 
-    /* post send */
-    DEBUG_LOG("post send request (server)\n");
+    /* use the later half of rdma_buf to store the node name */
+    strncpy(conn->rdma_buf + (PAGE_SIZE / 2), g_nodename, __NEW_UTS_LEN + 1);
 
     ret = ib_post_send(conn->qp, &conn->send_wr, &bad_wr);
     if (ret) {
@@ -276,10 +263,31 @@ static int krdma_cm_established_server(struct krdma_conn *conn)
         goto out;
     }
 
-    DEBUG_LOG("polling send completion on server\n");
+    /* for send and receive completion */
+    krdma_poll_cq_one(conn);
     krdma_poll_cq_one(conn);
 
-    DEBUG_LOG("connection established (server)\n");
+    DEBUG_LOG("rdma_buf rkey: %llu, remote_addr: %llu\n", conn->recv_msg.cmd,
+              conn->recv_msg.arg1);
+
+    /* read the node name of the remote node */
+    conn->rdma_wr.remote_addr = conn->recv_msg.arg1 + (PAGE_SIZE / 2);
+    conn->rdma_wr.rkey = conn->recv_msg.cmd;
+    conn->rdma_wr.wr.opcode = IB_WR_RDMA_READ;
+    conn->rdma_sgl.length = (PAGE_SIZE / 2);
+
+    ret = ib_post_send(conn->qp, &conn->rdma_wr.wr, &bad_wr);
+    if (ret) {
+        pr_err("error on ib_post_send\n");
+        goto out;
+    }
+
+    /* for rdma read completion */
+    krdma_poll_cq_one(conn);
+
+    strncpy(conn->nodename, conn->rdma_buf, __NEW_UTS_LEN + 1);
+
+    DEBUG_LOG("connection established with %s\n", conn->nodename);
 
     return 0;
 
@@ -304,7 +312,7 @@ static int krdma_cm_handler_server(struct rdma_cm_id *cm_id,
         ret = krdma_cm_connect_request(cm_id);
         break;
     case RDMA_CM_EVENT_ESTABLISHED:
-        ret = krdma_cm_established_server(conn);
+        ret = krdma_cm_established(conn);
         break;
     case RDMA_CM_EVENT_ADDR_CHANGE:
     case RDMA_CM_EVENT_DISCONNECTED:
@@ -386,80 +394,6 @@ out_destroy_qp:
     return ret;
 }
 
-static int krdma_cm_established_client(struct krdma_conn *conn)
-{
-    int ret = 0;
-    const struct ib_send_wr *bad_wr;
-
-    conn->send_msg.cmd = conn->rkey;
-    conn->send_msg.arg1 = conn->rdma_dma_addr;
-    conn->send_msg.arg2 = PAGE_SIZE;
-    conn->send_msg.arg3 = 0;
-
-    /* post send request */
-    DEBUG_LOG("post send request (client)\n");
-
-    ret = ib_post_send(conn->qp, &conn->send_wr, &bad_wr);
-    if (ret) {
-        pr_err("error on ib_post_send\n");
-        goto out;
-    }
-
-    DEBUG_LOG("polling send completion on client\n");
-    krdma_poll_cq_one(conn);
-
-    /* poll cq one */
-    DEBUG_LOG("polling recv completion on client\n");
-    krdma_poll_cq_one(conn);
-
-    DEBUG_LOG("recv cmd: %llu, arg1: %llu, arg2: %llu, arg3: %llu\n",
-              conn->recv_msg.cmd, conn->recv_msg.arg1, conn->recv_msg.arg2,
-              conn->recv_msg.arg3);
-
-    DEBUG_LOG("connection established (client)\n");
-
-    DEBUG_LOG("test RDMA\n");
-
-    memset(conn->rdma_buf, 0xff, PAGE_SIZE);
-    DEBUG_LOG("%lu\n", *((unsigned long *) conn->rdma_buf));
-
-    conn->rdma_wr.remote_addr = conn->recv_msg.arg1;
-    conn->rdma_wr.rkey = conn->recv_msg.cmd;
-    conn->rdma_wr.wr.opcode = IB_WR_RDMA_WRITE;
-
-    ret = ib_post_send(conn->qp, &conn->rdma_wr.wr, &bad_wr);
-    if (ret) {
-        pr_err("error on ib_post_send\n");
-        goto out;
-    }
-
-    DEBUG_LOG("polling rdma completion on client\n");
-    krdma_poll_cq_one(conn);
-
-    memset(conn->rdma_buf, 0, PAGE_SIZE);
-    DEBUG_LOG("%lu\n", *((unsigned long *) conn->rdma_buf));
-
-    conn->rdma_wr.wr.opcode = IB_WR_RDMA_READ;
-
-    ret = ib_post_send(conn->qp, &conn->rdma_wr.wr, &bad_wr);
-    if (ret) {
-        pr_err("error on ib_post_send\n");
-        goto out;
-    }
-
-    DEBUG_LOG("polling rdma completion on client\n");
-    krdma_poll_cq_one(conn);
-
-    DEBUG_LOG("%lu\n", *((unsigned long *) conn->rdma_buf));
-
-    DEBUG_LOG("rdma read successful!\n");
-
-    return 0;
-
-out:
-    return ret;
-}
-
 static int krdma_cm_conn_rejected(struct krdma_conn *conn,
                                   struct rdma_cm_event *ev)
 {
@@ -486,7 +420,7 @@ static int krdma_cm_handler_client(struct rdma_cm_id *cm_id,
         cm_error = krdma_cm_route_resolved(conn);
         break;
     case RDMA_CM_EVENT_ESTABLISHED:
-        conn->cm_error = krdma_cm_established_client(conn);
+        conn->cm_error = krdma_cm_established(conn);
         /* complete cm_done regardless of sucess/failure */
         complete(&conn->cm_done);
         return 0;

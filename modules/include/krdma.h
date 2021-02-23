@@ -8,6 +8,7 @@ extern int g_debug;
 #include <rdma/rdma_cm.h>
 #include <linux/ioctl.h>
 #include <linux/completion.h>
+#include <linux/utsname.h>
 
 enum krdma_conn_state {
     CONN_STATE_IDLE,
@@ -22,6 +23,7 @@ struct krdma_msg {
 };
 
 struct krdma_conn {
+    char nodename[__NEW_UTS_LEN + 1];
     int state;
     struct rdma_cm_id *cm_id;
     struct ib_pd *pd;

@@ -28,7 +28,7 @@ static int g_port = 7472;
 module_param_named(port, g_port, int, 0);
 MODULE_PARM_DESC(port, "port number");
 
-static char g_nodename[__NEW_UTS_LEN + 1] = "";
+char g_nodename[__NEW_UTS_LEN + 1] = "";
 module_param_string(nodename, g_nodename, sizeof(g_nodename), 0);
 MODULE_PARM_DESC(nodename, "node name of this server");
 
