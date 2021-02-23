@@ -7,14 +7,60 @@
 #include <linux/jiffies.h>
 #include <linux/dma-mapping.h>
 #include <linux/utsname.h>
+#include <linux/spinlock.h>
+#include <linux/hashtable.h>
+#include <linux/string.h>
+#include <linux/stringhash.h>
+#include <linux/delay.h>
 
 #include <krdma.h>
+
+static DEFINE_SPINLOCK(ht_lock);
+static DEFINE_HASHTABLE(ht_krdma_node, 10);
 
 extern char g_nodename[__NEW_UTS_LEN + 1];
 
 static struct krdma_cm_context {
     struct rdma_cm_id *cm_id_server;
 } krdma_cm_context;
+
+static void release_qp(struct krdma_conn *conn)
+{
+    rdma_destroy_qp(conn->cm_id);
+    ib_destroy_cq(conn->cq);
+    ib_dealloc_pd(conn->pd);
+    conn->cq = NULL;
+    conn->pd = NULL;
+}
+
+static void krdma_disconnect(struct krdma_conn *conn)
+{
+    spin_lock(&ht_lock);
+    hash_del(&conn->hn);
+    spin_unlock(&ht_lock);
+    ib_dma_free_coherent(conn->pd->device, PAGE_SIZE, conn->rdma_buf,
+                         conn->rdma_dma_addr);
+    ib_dma_unmap_single(conn->pd->device, conn->send_dma_addr,
+                        sizeof(conn->send_msg) , DMA_BIDIRECTIONAL);
+    ib_dma_unmap_single(conn->pd->device, conn->recv_dma_addr,
+                        sizeof(conn->recv_msg) , DMA_BIDIRECTIONAL);
+    release_qp(conn);
+    rdma_destroy_id(conn->cm_id);
+    vfree(conn);
+}
+
+/**
+ * Add the connection to the hashtable.
+ */
+static void add_krdma_node(struct krdma_conn *conn)
+{
+    unsigned int key;
+
+    key = hashlen_hash(hashlen_string(ht_krdma_node, conn->nodename));
+    spin_lock(&ht_lock);
+    hash_add(ht_krdma_node, &conn->hn, key);
+    spin_unlock(&ht_lock);
+}
 
 static void krdma_cq_comp_handler(struct ib_cq *cq, void *ctx)
 {
@@ -119,15 +165,6 @@ out_dealloc_pd:
     conn->pd = NULL;
 out:
     return ret;
-}
-
-static void release_qp(struct krdma_conn *conn)
-{
-    rdma_destroy_qp(conn->cm_id);
-    ib_destroy_cq(conn->cq);
-    ib_dealloc_pd(conn->pd);
-    conn->cq = NULL;
-    conn->pd = NULL;
 }
 
 static int setup_message_buffer(struct krdma_conn *conn)
@@ -287,6 +324,8 @@ static int krdma_cm_established(struct krdma_conn *conn)
 
     strncpy(conn->nodename, conn->rdma_buf, __NEW_UTS_LEN + 1);
 
+    add_krdma_node(conn);
+
     DEBUG_LOG("connection established with %s\n", conn->nodename);
 
     return 0;
@@ -317,7 +356,7 @@ static int krdma_cm_handler_server(struct rdma_cm_id *cm_id,
     case RDMA_CM_EVENT_ADDR_CHANGE:
     case RDMA_CM_EVENT_DISCONNECTED:
     case RDMA_CM_EVENT_TIMEWAIT_EXIT:
-        /* TODO: implement disconnect event handler */
+        krdma_disconnect(conn);
         break;
     case RDMA_CM_EVENT_REJECTED:
         break;
@@ -328,6 +367,8 @@ static int krdma_cm_handler_server(struct rdma_cm_id *cm_id,
                rdma_event_msg(ev->event), ev->event);
         break;
     }
+
+    DEBUG_LOG("cm_handler_server finished\n");
 
     return 0;
 }
@@ -438,8 +479,7 @@ static int krdma_cm_handler_client(struct rdma_cm_id *cm_id,
         cm_error = -ECONNRESET;
         break;
     case RDMA_CM_EVENT_DISCONNECTED:
-        pr_info("CM got a disconnect event\n");
-        /* TODO: implement disconnect handling function */
+        krdma_disconnect(conn);
         break;
     case RDMA_CM_EVENT_ADDR_CHANGE:
     case RDMA_CM_EVENT_TIMEWAIT_EXIT:
@@ -454,6 +494,8 @@ static int krdma_cm_handler_client(struct rdma_cm_id *cm_id,
         conn->cm_error = cm_error;
         complete(&conn->cm_done);
     }
+
+    DEBUG_LOG("cm_handler_client finished\n");
 
     return 0;
 }
@@ -552,6 +594,7 @@ int krdma_cm_setup(char *server, int port, void *context)
     struct rdma_cm_id *cm_id;
     struct sockaddr_storage sin;
 
+     /* NOTE: returning non-zero value from the handler will destroy cm_id. */
     cm_id = rdma_create_id(&init_net, krdma_cm_handler_server, context,
                            RDMA_PS_TCP, IB_QPT_RC);
     if (IS_ERR(cm_id)) {
@@ -587,12 +630,18 @@ out:
     return -1;
 }
 
-
 void krdma_cm_cleanup(void)
 {
+    int i = 0;
+    struct hlist_node *tmp;
+    struct krdma_conn *curr;
+
+    hash_for_each_safe(ht_krdma_node, i, tmp, curr, hn) {
+        rdma_disconnect(curr->cm_id);
+    }
+
     rdma_destroy_id(krdma_cm_context.cm_id_server);
 }
-
 
 void krdma_test(void)
 {

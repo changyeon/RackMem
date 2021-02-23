@@ -9,6 +9,7 @@ extern int g_debug;
 #include <linux/ioctl.h>
 #include <linux/completion.h>
 #include <linux/utsname.h>
+#include <linux/types.h>
 
 enum krdma_conn_state {
     CONN_STATE_IDLE,
@@ -55,6 +56,8 @@ struct krdma_conn {
 
     struct ib_sge rdma_sgl;
     struct ib_rdma_wr rdma_wr;
+
+    struct hlist_node hn;
 };
 
 int krdma_cm_connect(char *server, int port);
