@@ -10,6 +10,7 @@ extern int g_debug;
 #include <linux/completion.h>
 #include <linux/utsname.h>
 #include <linux/types.h>
+#include <linux/workqueue.h>
 
 enum krdma_conn_state {
     CONN_STATE_IDLE,
@@ -33,6 +34,7 @@ struct krdma_conn {
     struct ib_qp *qp;
     int cm_error;
     struct completion cm_done;
+    struct work_struct release_work;
 
     u32 lkey;
     u32 rkey;

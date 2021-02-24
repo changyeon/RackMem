@@ -12,6 +12,7 @@
 #include <linux/string.h>
 #include <linux/stringhash.h>
 #include <linux/delay.h>
+#include <linux/workqueue.h>
 
 #include <krdma.h>
 
@@ -33,20 +34,30 @@ static void release_qp(struct krdma_conn *conn)
     conn->pd = NULL;
 }
 
-static void krdma_disconnect(struct krdma_conn *conn)
+static void krdma_release_work(struct work_struct *ws)
 {
-    spin_lock(&ht_lock);
-    hash_del(&conn->hn);
-    spin_unlock(&ht_lock);
+    struct krdma_conn *conn;
+
+    conn = container_of(ws, struct krdma_conn, release_work);
+
+    ib_drain_qp(conn->qp);
+    rdma_destroy_qp(conn->cm_id);
+    rdma_destroy_id(conn->cm_id);
+    ib_free_cq(conn->cq);
+    ib_dealloc_pd(conn->pd);
+
     ib_dma_free_coherent(conn->pd->device, PAGE_SIZE, conn->rdma_buf,
                          conn->rdma_dma_addr);
     ib_dma_unmap_single(conn->pd->device, conn->send_dma_addr,
                         sizeof(conn->send_msg) , DMA_BIDIRECTIONAL);
     ib_dma_unmap_single(conn->pd->device, conn->recv_dma_addr,
                         sizeof(conn->recv_msg) , DMA_BIDIRECTIONAL);
-    release_qp(conn);
-    rdma_destroy_id(conn->cm_id);
-    vfree(conn);
+
+    spin_lock(&ht_lock);
+    hash_del(&conn->hn);
+    spin_unlock(&ht_lock);
+
+    kfree(conn);
 }
 
 /**
@@ -244,6 +255,7 @@ static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
     }
 
     init_completion(&conn->cm_done);
+    INIT_WORK(&conn->release_work, krdma_release_work);
     conn->cm_id = cm_id;
 
     ret = allocate_qp(conn);
@@ -356,7 +368,8 @@ static int krdma_cm_handler_server(struct rdma_cm_id *cm_id,
     case RDMA_CM_EVENT_ADDR_CHANGE:
     case RDMA_CM_EVENT_DISCONNECTED:
     case RDMA_CM_EVENT_TIMEWAIT_EXIT:
-        krdma_disconnect(conn);
+        rdma_disconnect(conn->cm_id);
+        schedule_work(&conn->release_work);
         break;
     case RDMA_CM_EVENT_REJECTED:
         break;
@@ -479,7 +492,8 @@ static int krdma_cm_handler_client(struct rdma_cm_id *cm_id,
         cm_error = -ECONNRESET;
         break;
     case RDMA_CM_EVENT_DISCONNECTED:
-        krdma_disconnect(conn);
+        rdma_disconnect(conn->cm_id);
+        schedule_work(&conn->release_work);
         break;
     case RDMA_CM_EVENT_ADDR_CHANGE:
     case RDMA_CM_EVENT_TIMEWAIT_EXIT:
@@ -545,6 +559,8 @@ int krdma_cm_connect(char *server, int port)
     }
 
     init_completion(&conn->cm_done);
+    INIT_WORK(&conn->release_work, krdma_release_work);
+
     conn->cm_id = rdma_create_id(&init_net, krdma_cm_handler_client,
                                  (void *) conn, RDMA_PS_TCP, IB_QPT_RC);
     if (IS_ERR(conn->cm_id)) {
@@ -630,15 +646,36 @@ out:
     return -1;
 }
 
+/**
+ * Returns the number of live connections.
+ */
+static int get_nr_live_conn(void)
+{
+    int i = 0, n = 0;
+    struct krdma_conn *curr;
+
+    spin_lock(&ht_lock);
+    hash_for_each(ht_krdma_node, i, curr, hn) {
+        n++;
+    }
+    spin_unlock(&ht_lock);
+
+    return n;
+}
+
 void krdma_cm_cleanup(void)
 {
     int i = 0;
-    struct hlist_node *tmp;
     struct krdma_conn *curr;
 
-    hash_for_each_safe(ht_krdma_node, i, tmp, curr, hn) {
+    spin_lock(&ht_lock);
+    hash_for_each(ht_krdma_node, i, curr, hn) {
         rdma_disconnect(curr->cm_id);
     }
+    spin_unlock(&ht_lock);
+
+    while (get_nr_live_conn() > 0)
+        msleep(100);
 
     rdma_destroy_id(krdma_cm_context.cm_id_server);
 }
