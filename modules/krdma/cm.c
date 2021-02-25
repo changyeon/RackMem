@@ -13,6 +13,7 @@
 #include <linux/stringhash.h>
 #include <linux/delay.h>
 #include <linux/workqueue.h>
+#include <linux/random.h>
 
 #include <krdma.h>
 
@@ -24,6 +25,143 @@ extern char g_nodename[__NEW_UTS_LEN + 1];
 static struct krdma_cm_context {
     struct rdma_cm_id *cm_id_server;
 } krdma_cm_context;
+
+static void print_device_attr(struct ib_device_attr *dev_attr)
+{
+    u64 flags;
+    flags = dev_attr->device_cap_flags;
+
+    pr_info("fw_ver: %llu\n", dev_attr->fw_ver);
+    pr_info("max_mr_size: %llu\n", dev_attr->max_mr_size);
+    pr_info("page_size_cap: %llu\n", dev_attr->page_size_cap);
+    pr_info("vendor_id: %u\n", dev_attr->vendor_id);
+    pr_info("hw_ver: %u\n", dev_attr->hw_ver);
+    pr_info("max_qp: %u\n", dev_attr->max_qp);
+    pr_info("max_qp_wr: %u\n", dev_attr->max_qp_wr);
+    pr_info("device_cap_flags: 0x%llx\n", dev_attr->device_cap_flags);
+    pr_info("IB_DEV_MEM_MGT_EXTENSIONS: %llu\n",
+            (flags & IB_DEVICE_MEM_MGT_EXTENSIONS) ? 1ULL : 0ULL);
+    pr_info("max_send_sge: %d\n", dev_attr->max_send_sge);
+    pr_info("max_recv_sge: %d\n", dev_attr->max_recv_sge);
+    pr_info("max_cq: %d\n", dev_attr->max_cq);
+    pr_info("max_cqe: %d\n", dev_attr->max_cqe);
+    pr_info("max_mr: %d\n", dev_attr->max_mr);
+    pr_info("max_pd: %d\n", dev_attr->max_pd);
+    pr_info("max_ah: %d\n", dev_attr->max_ah);
+    pr_info("max_fmr: %d\n", dev_attr->max_fmr);
+    pr_info("max_srq: %d\n", dev_attr->max_fmr);
+    pr_info("max_srq_wr: %d\n", dev_attr->max_fmr);
+    pr_info("max_srq_sge: %d\n", dev_attr->max_fmr);
+    pr_info("max_fmr_pglist: %u\n", dev_attr->max_fast_reg_page_list_len);
+    pr_info("max_pkeys: %u\n", dev_attr->max_pkeys);
+}
+
+static void print_port_attr(struct ib_device *dev)
+{
+    int i, ret;
+    struct ib_port_attr port_attr;
+
+    for (i = 0; i < dev->phys_port_cnt; i++) {
+        memset(&port_attr, 0, sizeof(port_attr));
+        ret = ib_query_port(dev, (u8) (i + 1), &port_attr);
+        if (ret) {
+            pr_err("error on ib_query_port: %d\n", ret);
+            break;
+        }
+        pr_info("port_num: %d\n", i + 1);
+        pr_info("max_mtu: %u\n", port_attr.max_mtu);
+        pr_info("active_mtu: %u\n", port_attr.active_mtu);
+        pr_info("port_cap_flags: %u\n", port_attr.port_cap_flags);
+        pr_info("max_msg_sz: %u\n", port_attr.max_msg_sz);
+        pr_info("sm_lid: %u\n", port_attr.sm_lid);
+        pr_info("lid: %u\n", port_attr.lid);
+        pr_info("active_width: %u\n", port_attr.active_width);
+        pr_info("active_speed: %u\n", port_attr.active_speed);
+        pr_info("===============================================\n");
+    }
+}
+
+void static print_qp_attr(struct ib_qp *qp)
+{
+    int ret;
+    struct ib_qp_attr qp_attr;
+    struct ib_qp_init_attr qp_init_attr;
+
+    ret = ib_query_qp(qp, &qp_attr, 0, &qp_init_attr);
+    if (ret) {
+        pr_err("error on ib_query_qp: %d\n", ret);
+        return;
+    }
+    pr_info("qp_state: %d\n", qp_attr.qp_state);
+    pr_info("cur_qp_state: %d\n", qp_attr.cur_qp_state);
+    pr_info("path_mtu: %d\n", qp_attr.path_mtu);
+    pr_info("qkey: %u\n", qp_attr.qkey);
+    pr_info("rq_psn: %u\n", qp_attr.rq_psn);
+    pr_info("sq_psn: %u\n", qp_attr.sq_psn);
+    pr_info("dest_qp_num: %u\n", qp_attr.dest_qp_num);
+    pr_info("qp_access_flags: %u\n", qp_attr.qp_access_flags);
+    pr_info("pkey_index: %u\n", qp_attr.pkey_index);
+    pr_info("min_rnr_timer: %u\n", qp_attr.min_rnr_timer);
+    pr_info("qp_attr_port_num: %u\n", qp_attr.port_num);
+    pr_info("timeout: %u\n", qp_attr.timeout);
+    pr_info("retry_cnt: %u\n", qp_attr.retry_cnt);
+    pr_info("rnr_retry: %u\n", qp_attr.rnr_retry);
+    pr_info("rate_limit: %u\n", qp_attr.rate_limit);
+    pr_info("max_send_wr: %u\n", qp_attr.cap.max_send_wr);
+    pr_info("max_recv_wr: %u\n", qp_attr.cap.max_recv_wr);
+    pr_info("max_send_sge: %u\n", qp_attr.cap.max_send_sge);
+    pr_info("max_recv_sge: %u\n", qp_attr.cap.max_recv_sge);
+    pr_info("max_inline_data: %u\n", qp_attr.cap.max_inline_data);
+    pr_info("event_handler: %p\n", qp_init_attr.event_handler);
+    pr_info("qp_context: %p\n", qp_init_attr.qp_context);
+    pr_info("send_cq: %p\n", qp_init_attr.send_cq);
+    pr_info("recv_cq: %p\n", qp_init_attr.recv_cq);
+    pr_info("sq_sig_type: %d\n", qp_init_attr.sq_sig_type);
+    pr_info("qp_type: %d\n", qp_init_attr.qp_type);
+    pr_info("create_flags: %u\n", qp_init_attr.create_flags);
+    pr_info("qp_init_attr_port_num: %u\n", qp_init_attr.port_num);
+    pr_info("qp_num: %u\n", qp->qp_num);
+    pr_info("qp_port: %u\n", qp->port);
+    pr_info("source_qpn: %u\n", qp_init_attr.source_qpn);
+}
+
+/**
+ * print the connection information
+ */
+static void print_conn(struct krdma_conn *conn)
+{
+    struct ib_device *dev;
+    struct ib_device_attr *dev_attr;
+
+    dev = conn->cm_id->device;
+    dev_attr = &dev->attrs;
+
+    pr_info("============ print connection info ============\n");
+    pr_info("nodename: %s\n", conn->nodename);
+    pr_info("cm_id: %p\n", conn->cm_id);
+    pr_info("pd: %p, cq: %p, qp: %p\n", conn->pd, conn->cq, conn->qp);
+    pr_info("lkey: %u, rkey: %u\n", conn->lkey, conn->rkey);
+    pr_info("send_dma_addr: %llu, recv_dma_addr: %llu\n", conn->send_dma_addr,
+            conn->recv_dma_addr);
+    pr_info("rdma_buf: %p, rdma_dma_addr: %llu\n", conn->rdma_buf,
+            conn->rdma_dma_addr);
+
+    pr_info("=========== print device attributes ===========\n");
+    pr_info("name: %s\n", dev->name);
+    pr_info("phys_port_cnt: %u\n", dev->phys_port_cnt);
+    print_device_attr(dev_attr);
+
+    pr_info("============ print port attributes ============\n");
+    print_port_attr(dev);
+
+    pr_info("============= print rdma qp attributes =============\n");
+    print_qp_attr(conn->qp);
+
+    pr_info("============= print message qp attributes =============\n");
+    print_qp_attr(conn->msg_qp);
+
+    pr_info("===============================================\n");
+}
 
 static void release_qp(struct krdma_conn *conn)
 {
@@ -42,6 +180,7 @@ static void krdma_release_work(struct work_struct *ws)
 
     ib_drain_qp(conn->qp);
     rdma_destroy_qp(conn->cm_id);
+    ib_destroy_qp(conn->msg_qp);
     rdma_destroy_id(conn->cm_id);
     ib_free_cq(conn->cq);
     ib_dealloc_pd(conn->pd);
@@ -101,25 +240,173 @@ static int krdma_poll_cq_one(struct krdma_conn *conn)
     return 0;
 }
 
+static int connect_msg_qp(struct krdma_conn *conn)
+{
+    int ret, mask;
+    struct ib_device *dev = conn->cm_id->device;
+    struct ib_qp_attr qp_attr;
+    struct ib_qp_attr msg_qp_attr;
+    struct ib_qp_init_attr qp_init_attr;
+    struct ib_port_attr port_attr;
+
+    memset(&port_attr, 0, sizeof(port_attr));
+    ret = ib_query_port(dev, (u8) 1, &port_attr);
+    if (ret) {
+        pr_err("error on ib_query_port: %d\n", ret);
+        goto out;
+    }
+
+    memset(&qp_attr, 0, sizeof(qp_attr));
+    memset(&qp_init_attr, 0, sizeof(qp_init_attr));
+    ret = ib_query_qp(conn->qp, &qp_attr, 0, &qp_init_attr);
+    if (ret) {
+        pr_err("error on ib_query_qp: %d\n", ret);
+        goto out;
+    }
+
+    /* transition to INIT */
+    mask  = IB_QP_STATE;
+    mask |= IB_QP_ACCESS_FLAGS;
+    mask |= IB_QP_PKEY_INDEX;
+    mask |= IB_QP_PORT;
+
+    memset(&msg_qp_attr, 0, sizeof(msg_qp_attr));
+    msg_qp_attr.qp_state = IB_QPS_INIT;
+    msg_qp_attr.qp_access_flags = qp_attr.qp_access_flags;
+    msg_qp_attr.pkey_index = qp_attr.pkey_index;
+    msg_qp_attr.port_num = qp_attr.port_num;
+
+    DEBUG_LOG("modify_qp: NONE -> INIT\n");
+    ret = ib_modify_qp(conn->msg_qp, &msg_qp_attr, mask);
+    if (ret) {
+        pr_err("error on ib_modify_qp: %d\n", ret);
+        goto out;
+    }
+    DEBUG_LOG("modify_qp: NONE -> INIT successful!\n");
+
+    /* trasition to RTR */
+    mask  = IB_QP_STATE;
+    mask |= IB_QP_AV;
+    mask |= IB_QP_PATH_MTU;
+    mask |= IB_QP_DEST_QPN;
+    mask |= IB_QP_RQ_PSN;
+    mask |= IB_QP_MAX_DEST_RD_ATOMIC;
+    mask |= IB_QP_MIN_RNR_TIMER;
+
+    memset(&msg_qp_attr, 0, sizeof(msg_qp_attr));
+    msg_qp_attr.qp_state = IB_QPS_RTR;
+    msg_qp_attr.ah_attr = qp_attr.ah_attr;
+    msg_qp_attr.path_mtu = qp_attr.path_mtu;
+    msg_qp_attr.dest_qp_num = conn->msg_remote_qpn;
+    msg_qp_attr.rq_psn = conn->msg_remote_psn;
+    msg_qp_attr.max_dest_rd_atomic = qp_attr.max_dest_rd_atomic;
+    msg_qp_attr.min_rnr_timer = qp_attr.min_rnr_timer;
+
+    DEBUG_LOG("modify_qp: INIT -> RTR\n");
+    ret = ib_modify_qp(conn->msg_qp, &msg_qp_attr, mask);
+    if (ret) {
+        pr_err("error on ib_modify_qp: %d\n", ret);
+        goto out;
+    }
+    DEBUG_LOG("modify_qp: INIT -> RTR successful!\n");
+
+    /* trasition to RTS */
+    mask  = IB_QP_STATE;
+    mask |= IB_QP_SQ_PSN;
+    mask |= IB_QP_RETRY_CNT;
+    mask |= IB_QP_RNR_RETRY;
+    mask |= IB_QP_MAX_QP_RD_ATOMIC;
+    mask |= IB_QP_TIMEOUT;
+
+    memset(&msg_qp_attr, 0, sizeof(msg_qp_attr));
+    msg_qp_attr.qp_state = IB_QPS_RTS;
+    msg_qp_attr.sq_psn = conn->msg_local_psn;
+    msg_qp_attr.retry_cnt = qp_attr.retry_cnt;
+    msg_qp_attr.rnr_retry = qp_attr.rnr_retry;
+    msg_qp_attr.max_rd_atomic = qp_attr.max_rd_atomic;
+    msg_qp_attr.timeout = qp_attr.timeout;
+
+    DEBUG_LOG("modify_qp: RTR -> RTS\n");
+    ret = ib_modify_qp(conn->msg_qp, &msg_qp_attr, mask);
+    if (ret) {
+        pr_err("error on ib_modify_qp: %d\n", ret);
+        goto out;
+    }
+    DEBUG_LOG("modify_qp: RTR -> RTS successful!\n");
+
+    return 0;
+
+out:
+    return ret;
+}
+
+static int allocate_msg_qp(struct krdma_conn *conn)
+{
+    struct rdma_cm_id *cm_id = conn->cm_id;
+    int ret;
+    struct ib_cq_init_attr cq_attr;
+    struct ib_qp_init_attr qp_attr;
+
+    memset(&cq_attr, 0, sizeof(cq_attr));
+    cq_attr.cqe = 128;
+    cq_attr.comp_vector = 0;
+
+    conn->msg_cq = ib_create_cq(cm_id->device, krdma_cq_comp_handler,
+                                krdma_cq_event_handler, conn, &cq_attr);
+    if (IS_ERR(conn->msg_cq)) {
+        ret = PTR_ERR(conn->msg_cq);
+        pr_err("error on ib_create_cq: %d\n", ret);
+        goto out;
+    }
+
+    memset(&qp_attr, 0, sizeof(qp_attr));
+    qp_attr.qp_context = (void *) conn;
+    qp_attr.send_cq = conn->msg_cq;
+    qp_attr.recv_cq = conn->msg_cq;
+    qp_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
+    qp_attr.qp_type = IB_QPT_RC;
+    qp_attr.cap.max_send_wr = 128;
+    qp_attr.cap.max_recv_wr = 128;
+    qp_attr.cap.max_send_sge = 16;
+    qp_attr.cap.max_recv_sge = 16;
+
+    /* for flush_qp() ? */
+    qp_attr.cap.max_send_wr++;
+    qp_attr.cap.max_recv_wr++;
+
+    conn->msg_qp = ib_create_qp(conn->pd, &qp_attr);
+    if (IS_ERR(conn->msg_qp)) {
+        ret = PTR_ERR(conn->msg_qp);
+        pr_err("error on ib_create_qp: %d\n", ret);
+        goto out_destroy_cq;
+    }
+
+    return 0;
+
+out_destroy_cq:
+    ib_destroy_cq(conn->msg_cq);
+    conn->msg_cq = NULL;
+out:
+    return ret;
+}
+
 static int allocate_qp(struct krdma_conn *conn)
 {
     struct rdma_cm_id *cm_id = conn->cm_id;
     int ret = 0;
     struct ib_cq_init_attr cq_attr;
     struct ib_qp_init_attr qp_attr;
-    struct ib_device_attr *dev_attr;
 
     conn->pd = ib_alloc_pd(cm_id->device, IB_PD_UNSAFE_GLOBAL_RKEY);
     if (IS_ERR(conn->pd)) {
         ret = PTR_ERR(conn->pd);
-        pr_err("error on ib_alloc_pd\n");
+        pr_err("error on ib_alloc_pd: %d\n", ret);
         goto out;
     }
 
     DEBUG_LOG("local_dma_lkey: %u, unsafe_global_rkey: %u\n",
               conn->pd->local_dma_lkey, conn->pd->unsafe_global_rkey);
 
-    conn->mr = conn->pd->__internal_mr;
     conn->lkey = conn->pd->local_dma_lkey;
     conn->rkey = conn->pd->unsafe_global_rkey;
 
@@ -127,18 +414,11 @@ static int allocate_qp(struct krdma_conn *conn)
     cq_attr.cqe = 128;
     cq_attr.comp_vector = 0;
 
-    conn->cq = ib_create_cq(cm_id->device, krdma_cq_comp_handler,
-                            krdma_cq_event_handler, conn, &cq_attr);
+    conn->cq = ib_create_cq(cm_id->device, NULL, NULL, conn, &cq_attr);
     if (IS_ERR(conn->cq)) {
         ret = PTR_ERR(conn->cq);
-        pr_err("error on ib_create_cq\n");
+        pr_err("error on ib_create_cq: %d\n", ret);
         goto out_dealloc_pd;
-    }
-
-    ret = ib_req_notify_cq(conn->cq, IB_CQ_NEXT_COMP);
-    if (ret) {
-        pr_err("error on ib_req_notify_cq\n");
-        goto out_destroy_cq;
     }
 
     memset(&qp_attr, 0, sizeof(qp_attr));
@@ -147,16 +427,14 @@ static int allocate_qp(struct krdma_conn *conn)
     qp_attr.recv_cq = conn->cq;
     qp_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     qp_attr.qp_type = IB_QPT_RC;
-    qp_attr.cap.max_send_wr = 64;
-    qp_attr.cap.max_recv_wr = 64;
+    qp_attr.cap.max_send_wr = 128;
+    qp_attr.cap.max_recv_wr = 128;
+    qp_attr.cap.max_send_sge = 16;
+    qp_attr.cap.max_recv_sge = 16;
 
     /* for flush_qp() ? */
     qp_attr.cap.max_send_wr++;
     qp_attr.cap.max_recv_wr++;
-
-    dev_attr = &cm_id->device->attrs;
-    qp_attr.cap.max_recv_sge = 1;
-    qp_attr.cap.max_send_sge = 1;
 
     ret = rdma_create_qp(cm_id, conn->pd, &qp_attr);
     if (ret) {
@@ -240,6 +518,9 @@ out_nomem:
     return ret;
 }
 
+/**
+ * server side connection request handling
+ */
 static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
 {
     int ret;
@@ -260,7 +541,7 @@ static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
 
     ret = allocate_qp(conn);
     if (ret) {
-        pr_err("error on allocate_qp\n");
+        pr_err("error on allocate_qp: %d\n", ret);
         goto out;
     }
 
@@ -269,7 +550,7 @@ static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
 
     ret = ib_post_recv(conn->qp, &conn->recv_wr, &bad_wr);
     if (ret) {
-        pr_err("error on ib_post_recv\n");
+        pr_err("error on ib_post_recv: %d\n", ret);
         goto out_release_qp;
     }
     DEBUG_LOG("post recv on the server side\n");
@@ -280,7 +561,7 @@ static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
 
     ret = rdma_accept(cm_id, &param);
     if (ret) {
-        pr_err("error on rdma_accept\n");
+        pr_err("error on rdma_accept: %d\n", ret);
         goto out_release_qp;
     }
 
@@ -297,18 +578,39 @@ static int krdma_cm_established(struct krdma_conn *conn)
     int ret = 0;
     const struct ib_send_wr *bad_wr;
 
-    /* fill message buffer with RDMA region info */
-    conn->send_msg.cmd = conn->rkey;
-    conn->send_msg.arg1 = conn->rdma_dma_addr;
-    conn->send_msg.arg2 = PAGE_SIZE;
-    conn->send_msg.arg3 = 0;
+    /* create an additional QP for message exchange */
+    ret = allocate_msg_qp(conn);
+    if (ret) {
+        pr_err("error on allocate_msg_qp: %d\n", ret);
+        goto out_disconnect;
+    }
 
-    /* use the later half of rdma_buf to store the node name */
+    conn->msg_local_qpn = conn->msg_qp->qp_num;
+    conn->msg_local_psn = get_random_int() & 0xFFFFFF;
+    conn->msg_local_lid = conn->qp->port;
+
+    /* fill the message buffer with RDMA region info and message QP info */
+    conn->send_msg.cmd = KRDMA_CMD_INITIAL_EXCHANGE;
+    conn->send_msg.arg1 = conn->rkey;
+    conn->send_msg.arg2 = conn->rdma_dma_addr;
+    conn->send_msg.arg3 = PAGE_SIZE;
+    conn->send_msg.arg4 = conn->msg_local_qpn;
+    conn->send_msg.arg5 = conn->msg_local_psn;
+    conn->send_msg.arg6 = conn->msg_local_lid;
+
+    DEBUG_LOG("local_qpn: %llu, local_psn: %llu, local_lid: %llu\n",
+              conn->send_msg.arg4, conn->send_msg.arg5, conn->send_msg.arg6);
+
+    /*
+     * preparation for the node name exchange with RDMA.
+     * write the local node name to the last half of the buffer.
+     * the remote node name will be written to the first half of the buffer.
+     */
     strncpy(conn->rdma_buf + (PAGE_SIZE / 2), g_nodename, __NEW_UTS_LEN + 1);
 
     ret = ib_post_send(conn->qp, &conn->send_wr, &bad_wr);
     if (ret) {
-        pr_err("error on ib_post_send\n");
+        pr_err("error on ib_post_send: %d\n", ret);
         goto out;
     }
 
@@ -316,32 +618,57 @@ static int krdma_cm_established(struct krdma_conn *conn)
     krdma_poll_cq_one(conn);
     krdma_poll_cq_one(conn);
 
-    DEBUG_LOG("rdma_buf rkey: %llu, remote_addr: %llu\n", conn->recv_msg.cmd,
-              conn->recv_msg.arg1);
+    DEBUG_LOG("rdma_buf rkey: %llu, remote_addr: %llu, remote_size: %llu, "
+              "remote_qpn: %llu, remote_psn: %llu, remote_lid: %llu\n",
+              conn->recv_msg.arg1, conn->recv_msg.arg2, conn->recv_msg.arg3,
+              conn->recv_msg.arg4, conn->recv_msg.arg5, conn->recv_msg.arg6);
 
-    /* read the node name of the remote node */
-    conn->rdma_wr.remote_addr = conn->recv_msg.arg1 + (PAGE_SIZE / 2);
-    conn->rdma_wr.rkey = conn->recv_msg.cmd;
+    conn->msg_remote_qpn = conn->recv_msg.arg4;
+    conn->msg_remote_psn = conn->recv_msg.arg5;
+    conn->msg_remote_lid = conn->recv_msg.arg6;
+
+    /* connect the message QP */
+    ret = connect_msg_qp(conn);
+    if (ret) {
+        pr_err("error on connect_msg_qp: %d\n", ret);
+        goto out_disconnect;
+    }
+
+    /* read the remote node name with RDMA READ */
+    conn->rdma_wr.remote_addr = conn->recv_msg.arg2 + (PAGE_SIZE / 2);
+    conn->rdma_wr.rkey = conn->recv_msg.arg1;
     conn->rdma_wr.wr.opcode = IB_WR_RDMA_READ;
     conn->rdma_sgl.length = (PAGE_SIZE / 2);
 
     ret = ib_post_send(conn->qp, &conn->rdma_wr.wr, &bad_wr);
     if (ret) {
-        pr_err("error on ib_post_send\n");
+        pr_err("error on ib_post_send: %d\n", ret);
         goto out;
     }
 
     /* for rdma read completion */
     krdma_poll_cq_one(conn);
 
+    /* update the remote node name and add it to the node hash table */
     strncpy(conn->nodename, conn->rdma_buf, __NEW_UTS_LEN + 1);
-
     add_krdma_node(conn);
+
+    if (g_debug)
+        print_conn(conn);
 
     DEBUG_LOG("connection established with %s\n", conn->nodename);
 
     return 0;
 
+out_disconnect:
+    pr_err("failed to establish the connection: %p\n", conn);
+
+    /*
+     * add this connection to the hash table to prevent the release worker
+     * try to delete the dangling conn from the hash table.
+     */
+    add_krdma_node(conn);
+    rdma_disconnect(conn->cm_id);
 out:
     return ret;
 }
@@ -394,7 +721,7 @@ static int krdma_cm_addr_resolved(struct krdma_conn *conn)
 
     ret = allocate_qp(conn);
     if (ret) {
-        pr_err("error on allocate_qp\n");
+        pr_err("error on allocate_qp: %d\n", ret);
         goto out;
     }
 
@@ -423,7 +750,7 @@ static int krdma_cm_route_resolved(struct krdma_conn *conn)
 
     ret = ib_post_recv(conn->qp, &conn->recv_wr, &bad_wr);
     if (ret) {
-        pr_err("error on ib_post_recv\n");
+        pr_err("error on ib_post_recv: %d\n", ret);
         goto out_destroy_qp;
     }
     DEBUG_LOG("post recv on the client side\n");
@@ -436,7 +763,7 @@ static int krdma_cm_route_resolved(struct krdma_conn *conn)
 
     ret = rdma_connect(conn->cm_id, &param);
     if (ret) {
-        pr_err("error on rdma_connect\n");
+        pr_err("error on rdma_connect: %d\n", ret);
         goto out_destroy_qp;
     }
 
@@ -577,7 +904,7 @@ int krdma_cm_connect(char *server, int port)
     ret = rdma_resolve_addr(conn->cm_id, NULL, (struct sockaddr *) &sin,
                             timeout_ms);
     if (ret) {
-        pr_err("error on rdma_resolve_addr");
+        pr_err("error on rdma_resolve_addr: %d", ret);
         goto out_destroy_cm_id;
     }
 

@@ -12,6 +12,10 @@ extern int g_debug;
 #include <linux/types.h>
 #include <linux/workqueue.h>
 
+enum krdma_cmd {
+    KRDMA_CMD_INITIAL_EXCHANGE
+};
+
 enum krdma_conn_state {
     CONN_STATE_IDLE,
     CONN_STATE_CONNECTED
@@ -22,6 +26,9 @@ struct krdma_msg {
     u64 arg1;
     u64 arg2;
     u64 arg3;
+    u64 arg4;
+    u64 arg5;
+    u64 arg6;
 };
 
 struct krdma_conn {
@@ -29,7 +36,6 @@ struct krdma_conn {
     int state;
     struct rdma_cm_id *cm_id;
     struct ib_pd *pd;
-    struct ib_mr *mr;
     struct ib_cq *cq;
     struct ib_qp *qp;
     int cm_error;
@@ -60,6 +66,18 @@ struct krdma_conn {
     struct ib_rdma_wr rdma_wr;
 
     struct hlist_node hn;
+
+    /* message QP */
+    struct ib_qp *msg_qp;
+    struct ib_cq *msg_cq;
+
+    u32 msg_local_qpn;
+    u32 msg_local_psn;
+    u32 msg_local_lid;
+
+    u32 msg_remote_qpn;
+    u32 msg_remote_psn;
+    u32 msg_remote_lid;
 };
 
 int krdma_cm_connect(char *server, int port);
