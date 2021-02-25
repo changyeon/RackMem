@@ -26,6 +26,22 @@ static struct krdma_cm_context {
     struct rdma_cm_id *cm_id_server;
 } krdma_cm_context;
 
+static const char * const wc_opcodes[] = {
+    [IB_WC_SEND]                = "SEND",
+    [IB_WC_RDMA_WRITE]          = "RDMA_WRITE",
+    [IB_WC_RDMA_READ]           = "RDMA_READ",
+    [IB_WC_COMP_SWAP]           = "COMP_SWAP",
+    [IB_WC_FETCH_ADD]           = "FETCH_ADD",
+    [IB_WC_LSO]                 = "LSO",
+    [IB_WC_LOCAL_INV]           = "LOCAL_INV",
+    [IB_WC_REG_MR]              = "REG_MR",
+    [IB_WC_MASKED_COMP_SWAP]    = "MASKED_COMP_SWAP",
+    [IB_WC_MASKED_FETCH_ADD]    = "MASKED_FETCH_ADD",
+    [IB_WC_RECV]                = "RECV",
+    [IB_WC_RECV_RDMA_WITH_IMM]  = "RECV_RDMA_WITH_IMM",
+};
+
+
 static void print_device_attr(struct ib_device_attr *dev_attr)
 {
     u64 flags;
@@ -232,7 +248,8 @@ static int krdma_poll_cq_one(struct krdma_conn *conn)
         if (ret < 0)
             pr_err("error on ib_poll_cq: (%d, %d)\n", ret, wc.status);
         if (ret == 1) {
-            DEBUG_LOG("poll cq successful\n");
+            DEBUG_LOG("poll cq successful: (%s, %d)\n", wc_opcodes[wc.opcode],
+                      wc.opcode);
             break;
         }
     }
@@ -356,6 +373,12 @@ static int allocate_msg_qp(struct krdma_conn *conn)
     if (IS_ERR(conn->msg_cq)) {
         ret = PTR_ERR(conn->msg_cq);
         pr_err("error on ib_create_cq: %d\n", ret);
+        goto out;
+    }
+
+    ret = ib_req_notify_cq(conn->msg_cq, IB_CQ_NEXT_COMP);
+    if (ret) {
+        pr_err("error on ib_req_notify_cq: %d\n", ret);
         goto out;
     }
 
@@ -573,10 +596,11 @@ out:
     return ret;
 }
 
-static int krdma_cm_established(struct krdma_conn *conn)
+static int krdma_cm_established_server(struct krdma_conn *conn)
 {
     int ret = 0;
-    const struct ib_send_wr *bad_wr;
+    const struct ib_recv_wr *bad_recv_wr;
+    const struct ib_send_wr *bad_send_wr;
 
     /* create an additional QP for message exchange */
     ret = allocate_msg_qp(conn);
@@ -589,43 +613,40 @@ static int krdma_cm_established(struct krdma_conn *conn)
     conn->msg_local_psn = get_random_int() & 0xFFFFFF;
     conn->msg_local_lid = conn->qp->port;
 
-    /* fill the message buffer with RDMA region info and message QP info */
-    conn->send_msg.cmd = KRDMA_CMD_INITIAL_EXCHANGE;
-    conn->send_msg.arg1 = conn->rkey;
-    conn->send_msg.arg2 = conn->rdma_dma_addr;
-    conn->send_msg.arg3 = PAGE_SIZE;
-    conn->send_msg.arg4 = conn->msg_local_qpn;
-    conn->send_msg.arg5 = conn->msg_local_psn;
-    conn->send_msg.arg6 = conn->msg_local_lid;
+    DEBUG_LOG("local_qpn: %u, local_psn: %u, local_lid: %u\n",
+              conn->msg_local_qpn, conn->msg_local_psn, conn->msg_local_lid);
 
-    DEBUG_LOG("local_qpn: %llu, local_psn: %llu, local_lid: %llu\n",
-              conn->send_msg.arg4, conn->send_msg.arg5, conn->send_msg.arg6);
+    /* fill the message buffer with the message QP info */
+    conn->send_msg.cmd = KRDMA_CMD_HANDSHAKE_MSG_QP;
+    conn->send_msg.arg1 = conn->msg_local_qpn;
+    conn->send_msg.arg2 = conn->msg_local_psn;
+    conn->send_msg.arg3 = conn->msg_local_lid;
 
-    /*
-     * preparation for the node name exchange with RDMA.
-     * write the local node name to the last half of the buffer.
-     * the remote node name will be written to the first half of the buffer.
-     */
-    strncpy(conn->rdma_buf + (PAGE_SIZE / 2), g_nodename, __NEW_UTS_LEN + 1);
+    /* receive the QP information from the client */
+    krdma_poll_cq_one(conn);
 
-    ret = ib_post_send(conn->qp, &conn->send_wr, &bad_wr);
+    ret = ib_post_recv(conn->qp, &conn->recv_wr, &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        goto out;
+    }
+
+    conn->msg_remote_qpn = conn->recv_msg.arg1;
+    conn->msg_remote_psn = conn->recv_msg.arg2;
+    conn->msg_remote_lid = conn->recv_msg.arg3;
+
+    DEBUG_LOG("remote_qpn: %u, remote_psn: %u, remote_lid: %u\n",
+              conn->msg_remote_qpn, conn->msg_remote_psn, conn->msg_remote_lid);
+
+    /* send the QP information to the client */
+    ret = ib_post_send(conn->qp, &conn->send_wr, &bad_send_wr);
     if (ret) {
         pr_err("error on ib_post_send: %d\n", ret);
         goto out;
     }
 
-    /* for send and receive completion */
+    /* poll send completion */
     krdma_poll_cq_one(conn);
-    krdma_poll_cq_one(conn);
-
-    DEBUG_LOG("rdma_buf rkey: %llu, remote_addr: %llu, remote_size: %llu, "
-              "remote_qpn: %llu, remote_psn: %llu, remote_lid: %llu\n",
-              conn->recv_msg.arg1, conn->recv_msg.arg2, conn->recv_msg.arg3,
-              conn->recv_msg.arg4, conn->recv_msg.arg5, conn->recv_msg.arg6);
-
-    conn->msg_remote_qpn = conn->recv_msg.arg4;
-    conn->msg_remote_psn = conn->recv_msg.arg5;
-    conn->msg_remote_lid = conn->recv_msg.arg6;
 
     /* connect the message QP */
     ret = connect_msg_qp(conn);
@@ -634,19 +655,169 @@ static int krdma_cm_established(struct krdma_conn *conn)
         goto out_disconnect;
     }
 
+    /*
+     * preparation for the node name exchange with RDMA.
+     * write the local node name to the last half of the buffer.
+     * the remote node name will be written to the first half of the buffer.
+     */
+    strncpy(conn->rdma_buf + (PAGE_SIZE / 2), g_nodename, __NEW_UTS_LEN + 1);
+
+    /* fill the message buffer with RDMA region info and message QP info */
+    conn->send_msg.cmd = KRDMA_CMD_HANDSHAKE_RDMA;
+    conn->send_msg.arg1 = conn->rkey;
+    conn->send_msg.arg2 = conn->rdma_dma_addr;
+    conn->send_msg.arg3 = PAGE_SIZE;
+
+    /* receive the RDMA buffer information from the client */
+    krdma_poll_cq_one(conn);
+
+    /* send the RDMA buffer information to the client */
+    ret = ib_post_send(conn->qp, &conn->send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
+
+    /* poll send completion */
+    krdma_poll_cq_one(conn);
+
     /* read the remote node name with RDMA READ */
     conn->rdma_wr.remote_addr = conn->recv_msg.arg2 + (PAGE_SIZE / 2);
     conn->rdma_wr.rkey = conn->recv_msg.arg1;
     conn->rdma_wr.wr.opcode = IB_WR_RDMA_READ;
     conn->rdma_sgl.length = (PAGE_SIZE / 2);
 
-    ret = ib_post_send(conn->qp, &conn->rdma_wr.wr, &bad_wr);
+    ret = ib_post_send(conn->qp, &conn->rdma_wr.wr, &bad_send_wr);
     if (ret) {
         pr_err("error on ib_post_send: %d\n", ret);
         goto out;
     }
 
-    /* for rdma read completion */
+    /* poll RDMA read completion */
+    krdma_poll_cq_one(conn);
+
+    /* update the remote node name and add it to the node hash table */
+    strncpy(conn->nodename, conn->rdma_buf, __NEW_UTS_LEN + 1);
+    add_krdma_node(conn);
+
+    if (g_debug)
+        print_conn(conn);
+
+    DEBUG_LOG("connection established with %s\n", conn->nodename);
+
+    return 0;
+
+out_disconnect:
+    pr_err("failed to establish the connection: %p\n", conn);
+
+    /*
+     * add this connection to the hash table to prevent the release worker
+     * try to delete the dangling conn from the hash table.
+     */
+    add_krdma_node(conn);
+    rdma_disconnect(conn->cm_id);
+out:
+    return ret;
+}
+
+static int krdma_cm_established_client(struct krdma_conn *conn)
+{
+    int ret = 0;
+    const struct ib_recv_wr *bad_recv_wr;
+    const struct ib_send_wr *bad_send_wr;
+
+    /* create an additional QP for message exchange */
+    ret = allocate_msg_qp(conn);
+    if (ret) {
+        pr_err("error on allocate_msg_qp: %d\n", ret);
+        goto out_disconnect;
+    }
+
+    conn->msg_local_qpn = conn->msg_qp->qp_num;
+    conn->msg_local_psn = get_random_int() & 0xFFFFFF;
+    conn->msg_local_lid = conn->qp->port;
+
+    DEBUG_LOG("local_qpn: %u, local_psn: %u, local_lid: %u\n",
+              conn->msg_local_qpn, conn->msg_local_psn, conn->msg_local_lid);
+
+    /* fill the message buffer with the message QP info */
+    conn->send_msg.cmd = KRDMA_CMD_HANDSHAKE_MSG_QP;
+    conn->send_msg.arg1 = conn->msg_local_qpn;
+    conn->send_msg.arg2 = conn->msg_local_psn;
+    conn->send_msg.arg3 = conn->msg_local_lid;
+
+    /* client sends the QP information first */
+    ret = ib_post_send(conn->qp, &conn->send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
+
+    /* poll send completion */
+    krdma_poll_cq_one(conn);
+
+    /* poll recv completion */
+    krdma_poll_cq_one(conn);
+
+    ret = ib_post_recv(conn->qp, &conn->recv_wr, &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        goto out;
+    }
+
+    conn->msg_remote_qpn = conn->recv_msg.arg1;
+    conn->msg_remote_psn = conn->recv_msg.arg2;
+    conn->msg_remote_lid = conn->recv_msg.arg3;
+
+    DEBUG_LOG("remote_qpn: %u, remote_psn: %u, remote_lid: %u\n",
+              conn->msg_remote_qpn, conn->msg_remote_psn, conn->msg_remote_lid);
+
+    /* connect the message QP */
+    ret = connect_msg_qp(conn);
+    if (ret) {
+        pr_err("error on connect_msg_qp: %d\n", ret);
+        goto out_disconnect;
+    }
+
+    /*
+     * preparation for the node name exchange with RDMA.
+     * write the local node name to the last half of the buffer.
+     * the remote node name will be written to the first half of the buffer.
+     */
+    strncpy(conn->rdma_buf + (PAGE_SIZE / 2), g_nodename, __NEW_UTS_LEN + 1);
+
+    /* fill the message buffer with RDMA region info and message QP info */
+    conn->send_msg.cmd = KRDMA_CMD_HANDSHAKE_RDMA;
+    conn->send_msg.arg1 = conn->rkey;
+    conn->send_msg.arg2 = conn->rdma_dma_addr;
+    conn->send_msg.arg3 = PAGE_SIZE;
+
+    /* client sends the RDMA information first */
+    ret = ib_post_send(conn->qp, &conn->send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
+
+    /* poll send completion */
+    krdma_poll_cq_one(conn);
+
+    /* poll recv completion */
+    krdma_poll_cq_one(conn);
+
+    /* read the remote node name with RDMA READ */
+    conn->rdma_wr.remote_addr = conn->recv_msg.arg2 + (PAGE_SIZE / 2);
+    conn->rdma_wr.rkey = conn->recv_msg.arg1;
+    conn->rdma_wr.wr.opcode = IB_WR_RDMA_READ;
+    conn->rdma_sgl.length = (PAGE_SIZE / 2);
+
+    ret = ib_post_send(conn->qp, &conn->rdma_wr.wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
+
+    /* poll RDMA read completion */
     krdma_poll_cq_one(conn);
 
     /* update the remote node name and add it to the node hash table */
@@ -690,7 +861,7 @@ static int krdma_cm_handler_server(struct rdma_cm_id *cm_id,
         ret = krdma_cm_connect_request(cm_id);
         break;
     case RDMA_CM_EVENT_ESTABLISHED:
-        ret = krdma_cm_established(conn);
+        ret = krdma_cm_established_server(conn);
         break;
     case RDMA_CM_EVENT_ADDR_CHANGE:
     case RDMA_CM_EVENT_DISCONNECTED:
@@ -801,7 +972,7 @@ static int krdma_cm_handler_client(struct rdma_cm_id *cm_id,
         cm_error = krdma_cm_route_resolved(conn);
         break;
     case RDMA_CM_EVENT_ESTABLISHED:
-        conn->cm_error = krdma_cm_established(conn);
+        conn->cm_error = krdma_cm_established_client(conn);
         /* complete cm_done regardless of sucess/failure */
         complete(&conn->cm_done);
         return 0;

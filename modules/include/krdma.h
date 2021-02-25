@@ -13,7 +13,8 @@ extern int g_debug;
 #include <linux/workqueue.h>
 
 enum krdma_cmd {
-    KRDMA_CMD_INITIAL_EXCHANGE
+    KRDMA_CMD_HANDSHAKE_RDMA,
+    KRDMA_CMD_HANDSHAKE_MSG_QP
 };
 
 enum krdma_conn_state {
@@ -26,9 +27,6 @@ struct krdma_msg {
     u64 arg1;
     u64 arg2;
     u64 arg3;
-    u64 arg4;
-    u64 arg5;
-    u64 arg6;
 };
 
 struct krdma_conn {
