@@ -15,7 +15,12 @@
 #include <linux/workqueue.h>
 #include <linux/random.h>
 
+#include "cm.h"
 #include <krdma.h>
+
+extern int g_debug;
+
+#define DEBUG_LOG if (g_debug) pr_info
 
 static DEFINE_SPINLOCK(ht_lock);
 static DEFINE_HASHTABLE(ht_krdma_node, 10);
@@ -40,7 +45,6 @@ static const char * const wc_opcodes[] = {
     [IB_WC_RECV]                = "RECV",
     [IB_WC_RECV_RDMA_WITH_IMM]  = "RECV_RDMA_WITH_IMM",
 };
-
 
 static void print_device_attr(struct ib_device_attr *dev_attr)
 {
@@ -170,10 +174,10 @@ static void print_conn(struct krdma_conn *conn)
     pr_info("============ print port attributes ============\n");
     print_port_attr(dev);
 
-    pr_info("============= print rdma qp attributes =============\n");
+    pr_info("========== print rdma qp attributes ===========\n");
     print_qp_attr(conn->qp);
 
-    pr_info("============= print message qp attributes =============\n");
+    pr_info("========= print message qp attributes =========\n");
     print_qp_attr(conn->msg_qp);
 
     pr_info("===============================================\n");
@@ -365,7 +369,7 @@ static int allocate_msg_qp(struct krdma_conn *conn)
     struct ib_qp_init_attr qp_attr;
 
     memset(&cq_attr, 0, sizeof(cq_attr));
-    cq_attr.cqe = 128;
+    cq_attr.cqe = KRDMA_CM_MAX_CQE;
     cq_attr.comp_vector = 0;
 
     conn->msg_cq = ib_create_cq(cm_id->device, krdma_cq_comp_handler,
@@ -388,10 +392,10 @@ static int allocate_msg_qp(struct krdma_conn *conn)
     qp_attr.recv_cq = conn->msg_cq;
     qp_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     qp_attr.qp_type = IB_QPT_RC;
-    qp_attr.cap.max_send_wr = 128;
-    qp_attr.cap.max_recv_wr = 128;
-    qp_attr.cap.max_send_sge = 16;
-    qp_attr.cap.max_recv_sge = 16;
+    qp_attr.cap.max_send_wr = KRDMA_CM_MAX_SEND_WR;
+    qp_attr.cap.max_recv_wr = KRDMA_CM_MAX_RECV_WR;
+    qp_attr.cap.max_send_sge = KRDMA_CM_MAX_SEND_SGE;
+    qp_attr.cap.max_recv_sge = KRDMA_CM_MAX_RECV_SGE;
 
     /* for flush_qp() ? */
     qp_attr.cap.max_send_wr++;
@@ -434,7 +438,7 @@ static int allocate_qp(struct krdma_conn *conn)
     conn->rkey = conn->pd->unsafe_global_rkey;
 
     memset(&cq_attr, 0, sizeof(cq_attr));
-    cq_attr.cqe = 128;
+    cq_attr.cqe = KRDMA_CM_MAX_CQE;
     cq_attr.comp_vector = 0;
 
     conn->cq = ib_create_cq(cm_id->device, NULL, NULL, conn, &cq_attr);
@@ -450,10 +454,10 @@ static int allocate_qp(struct krdma_conn *conn)
     qp_attr.recv_cq = conn->cq;
     qp_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     qp_attr.qp_type = IB_QPT_RC;
-    qp_attr.cap.max_send_wr = 128;
-    qp_attr.cap.max_recv_wr = 128;
-    qp_attr.cap.max_send_sge = 16;
-    qp_attr.cap.max_recv_sge = 16;
+    qp_attr.cap.max_send_wr = KRDMA_CM_MAX_SEND_WR;
+    qp_attr.cap.max_recv_wr = KRDMA_CM_MAX_RECV_WR;
+    qp_attr.cap.max_send_sge = KRDMA_CM_MAX_SEND_SGE;
+    qp_attr.cap.max_recv_sge = KRDMA_CM_MAX_RECV_SGE;
 
     /* for flush_qp() ? */
     qp_attr.cap.max_send_wr++;
@@ -929,8 +933,8 @@ static int krdma_cm_route_resolved(struct krdma_conn *conn)
     memset(&param, 0, sizeof(param));
     param.responder_resources = 1;
     param.initiator_depth = 1;
-    param.retry_count = 7;
-    param.rnr_retry_count = 7;
+    param.retry_count = KRDMA_CM_RETRY_COUNT;
+    param.rnr_retry_count = KRDMA_CM_RNR_RETRY_COUNT;
 
     ret = rdma_connect(conn->cm_id, &param);
     if (ret) {

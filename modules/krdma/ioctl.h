@@ -4,8 +4,8 @@
 #include <linux/ioctl.h>
 #include <linux/fs.h>
 
-#define KRDMA_IOCTL_CONNECT     _IOW(0xF7, 1, struct krdma_message_ioctl)
-#define KRDMA_IOCTL_DISCONNECT  _IO(0xF7, 2)
+#define KRDMA_IOCTL_CONNECT         _IOW(0xF7, 1, struct krdma_message_ioctl)
+#define KRDMA_IOCTL_DISCONNECT      _IO(0xF7, 2)
 
 struct krdma_message_ioctl {
     int port;

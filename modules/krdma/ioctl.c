@@ -5,6 +5,10 @@
 #include <krdma.h>
 #include "ioctl.h"
 
+extern int g_debug;
+
+#define DEBUG_LOG if (g_debug) pr_info
+
 long krdma_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 {
     long ret = 0;

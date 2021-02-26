@@ -7,6 +7,7 @@
 #include <linux/utsname.h>
 
 #include <krdma.h>
+#include "cm.h"
 #include "ioctl.h"
 
 #define DEVICE_NAME "krdma"
