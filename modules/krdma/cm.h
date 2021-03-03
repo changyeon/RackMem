@@ -1,11 +1,12 @@
 #ifndef _KRDMA_CM_H_
 #define _KRDMA_CM_H_
 
+#include <rdma/rdma_cm.h>
 #include <linux/types.h>
 #include <linux/utsname.h>
 #include <linux/completion.h>
 #include <linux/workqueue.h>
-#include <rdma/rdma_cm.h>
+#include <linux/spinlock.h>
 
 #define KRDMA_CM_RETRY_COUNT        128
 #define KRDMA_CM_RNR_RETRY_COUNT    128
@@ -16,65 +17,85 @@
 #define KRDMA_CM_MAX_SEND_SGE       16
 #define KRDMA_CM_MAX_RECV_SGE       16
 
+#define KRDMA_CMD_TIMEOUT           100
+
 enum krdma_cmd {
     KRDMA_CMD_HANDSHAKE_RDMA,
-    KRDMA_CMD_HANDSHAKE_MSG_QP
+    KRDMA_CMD_HANDSHAKE_RPC_QP,
+    KRDMA_CMD_REQUEST_NODE_NAME,
+    KRDMA_CMD_RESPONSE_NODE_NAME
 };
 
-struct krdma_msg {
+struct krdma_msg_fmt {
     u64 cmd;
     u64 arg1;
     u64 arg2;
     u64 arg3;
 };
 
-struct krdma_conn {
-    char nodename[__NEW_UTS_LEN + 1];
-    int state;
-    struct rdma_cm_id *cm_id;
-    struct ib_pd *pd;
-    struct ib_cq *cq;
+struct krdma_msg_pool {
+    struct list_head head;
+    u32 size;
+    spinlock_t lock;
+};
+
+typedef struct krdma_mr_t {
+    struct krdma_conn *conn;
+    u32 size;
+    void *vaddr;
+    dma_addr_t paddr;
+} krdma_mr_t;
+
+struct krdma_msg {
+    struct list_head head;
+    u32 size;
+    void *vaddr;
+    dma_addr_t paddr;
+    struct ib_sge sgl;
+    struct ib_send_wr send_wr;
+    struct ib_recv_wr recv_wr;
+    struct completion done;
+};
+
+struct krdma_qp {
     struct ib_qp *qp;
+    struct ib_cq *cq;
+
+    u32 local_qpn;
+    u32 local_psn;
+    u32 local_lid;
+
+    u32 remote_qpn;
+    u32 remote_psn;
+    u32 remote_lid;
+};
+
+struct krdma_conn {
+    struct hlist_node hn;
+    char nodename[__NEW_UTS_LEN + 1];
+
+    /* cm related */
     int cm_error;
+    struct rdma_cm_id *cm_id;
     struct completion cm_done;
     struct work_struct release_work;
 
+    /* global pd */
+    struct ib_pd *pd;
     u32 lkey;
     u32 rkey;
 
     /* message buffers */
-    struct krdma_msg send_msg __aligned(32);
-    struct krdma_msg recv_msg __aligned(32);
+    struct krdma_msg *send_msg;
+    struct krdma_msg *recv_msg;
 
-    u64 send_dma_addr;
-    u64 recv_dma_addr;
+    /* krdma QPs */
+    struct krdma_qp rdma_qp;
+    struct krdma_qp rpc_qp;
 
-    struct ib_sge send_sgl;
-    struct ib_sge recv_sgl;
-
-    struct ib_send_wr send_wr;
-    struct ib_recv_wr recv_wr;
-
-    /* RDMA buffers */
-    void *rdma_buf;
-    dma_addr_t rdma_dma_addr;
-
-    struct ib_sge rdma_sgl;
-    struct ib_rdma_wr rdma_wr;
-
-    struct hlist_node hn;
-
-    /* message QP */
-    struct ib_qp *msg_qp;
-    struct ib_cq *msg_cq;
-
-    u32 msg_local_qpn;
-    u32 msg_local_psn;
-    u32 msg_local_lid;
-
-    u32 msg_remote_qpn;
-    u32 msg_remote_psn;
-    u32 msg_remote_lid;
+    /* msg pool */
+    struct krdma_msg_pool send_msg_pool;
+    struct krdma_msg_pool recv_msg_pool;
 };
 
 int krdma_cm_setup(char *server, int port, void *context);
