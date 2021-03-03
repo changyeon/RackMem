@@ -281,7 +281,7 @@ static struct krdma_msg_pool *krdma_alloc_msg_pool(struct krdma_conn *conn,
     struct krdma_msg_pool *pool;
     struct krdma_msg *kmsg, *tmp;
 
-    DEBUG_LOG("release_alloc_pool: (%p, %d, %u)\n", conn, n, size);
+    DEBUG_LOG("alloc_msg_pool: (%p, %d, %u)\n", conn, n, size);
 
     pool = kzalloc(sizeof(*pool), GFP_KERNEL);
     if (pool == NULL) {
@@ -291,6 +291,7 @@ static struct krdma_msg_pool *krdma_alloc_msg_pool(struct krdma_conn *conn,
 
     INIT_LIST_HEAD(&pool->head);
     spin_lock_init(&pool->lock);
+    pool->size = 0;
 
     for (i = 0; i < n; i++) {
         kmsg = krdma_alloc_msg(conn, size);
@@ -329,6 +330,36 @@ static void krdma_release_msg_pool(struct krdma_conn *conn,
     kfree(pool);
 }
 
+static struct krdma_msg *krdma_get_msg(struct krdma_msg_pool *pool)
+{
+    struct krdma_msg *kmsg;
+
+    spin_lock(&pool->lock);
+    if (list_empty(&pool->head)) {
+        kmsg = NULL;
+        goto err;
+    }
+
+    kmsg = list_first_entry(&pool->head, struct krdma_msg, head);
+    list_del_init(&kmsg->head);
+    pool->size--;
+    spin_unlock(&pool->lock);
+
+    return kmsg;
+
+err:
+    spin_unlock(&pool->lock);
+
+    return NULL;
+}
+
+static void krdma_put_msg(struct krdma_msg_pool *pool, struct krdma_msg *kmsg)
+{
+    spin_lock(&pool->lock);
+    list_add_tail(&kmsg->head, &pool->head);
+    pool->size++;
+    spin_unlock(&pool->lock);
+}
 
 static void krdma_release_work(struct work_struct *ws)
 {
@@ -360,6 +391,9 @@ static void krdma_release_work(struct work_struct *ws)
 
     DEBUG_LOG("free recv msg pool\n");
     krdma_release_msg_pool(conn, conn->recv_msg_pool);
+
+    DEBUG_LOG("free send msg pool\n");
+    krdma_release_msg_pool(conn, conn->send_msg_pool);
 
     DEBUG_LOG("dealloc pd\n");
     ib_dealloc_pd(conn->pd);
@@ -396,9 +430,9 @@ static int rpc_handler_request_node_name(struct krdma_conn *conn,
     struct krdma_msg_fmt *send_buf;
     char *src, *dst;
 
-    send_msg = krdma_alloc_msg(conn, 4096);
+    send_msg = krdma_get_msg(conn->send_msg_pool);
     if (send_msg == NULL) {
-        pr_err("error krdma_alloc_msg\n");
+        pr_err("error on krmda_get_msg\n");
         ret = -ENOMEM;
         goto out;
     }
@@ -499,9 +533,8 @@ static int handle_msg(struct krdma_conn *conn, struct ib_wc *wc)
 
     switch (wc->opcode) {
     case IB_WC_SEND:
-        if (kmsg) {
-            krdma_free_msg(conn, kmsg);
-        }
+        if (kmsg)
+            krdma_put_msg(conn->send_msg_pool, kmsg);
         break;
     case IB_WC_RDMA_WRITE:
     case IB_WC_RDMA_READ:
@@ -929,9 +962,9 @@ static int krdma_get_node_name(struct krdma_conn *conn, char *dst)
 
     DEBUG_LOG("krdma_get_node_name\n");
 
-    send_msg = krdma_alloc_msg(conn, 4096);
+    send_msg = krdma_get_msg(conn->send_msg_pool);
     if (send_msg == NULL) {
-        pr_err("error on krdma_alloc_msg\n");
+        pr_err("error on krdma_get_msg\n");
         ret = -ENOMEM;
         goto out;
     }
@@ -959,13 +992,13 @@ static int krdma_get_node_name(struct krdma_conn *conn, char *dst)
         goto out_free_kmsg;
     }
 
-    krdma_free_msg(conn, send_msg);
+    krdma_put_msg(conn->send_msg_pool, send_msg);
     DEBUG_LOG("krdma_get_node_name completed free the message\n");
 
     return 0;
 
 out_free_kmsg:
-    krdma_free_msg(conn, send_msg);
+    krdma_put_msg(conn->send_msg_pool, send_msg);
 out:
     return ret;
 }
@@ -977,7 +1010,7 @@ static int krdma_post_wr(struct krdma_conn *conn, int n)
     const struct ib_recv_wr *bad_recv_wr;
     struct krdma_msg_pool *pool;
 
-    pool = krdma_alloc_msg_pool(conn, n, 4096);
+    pool = krdma_alloc_msg_pool(conn, n, KRDMA_WR_BUF_SIZE);
     if (pool == NULL) {
         pr_err("error on krdma_alloc_msg_pool\n");
         ret = -ENOMEM;
@@ -1077,9 +1110,16 @@ static int krdma_cm_established_server(struct krdma_conn *conn)
         goto out;
     }
 
-    ret = krdma_post_wr(conn, KRDMA_NR_POST_RECV);
+    ret = krdma_post_wr(conn, KRDMA_RECV_WR_POOL_SIZE);
     if (ret) {
         pr_err("error on krdma_post_wr\n");
+        goto out;
+    }
+
+    conn->send_msg_pool = krdma_alloc_msg_pool(
+            conn, KRDMA_SEND_WR_POOL_SIZE, KRDMA_WR_BUF_SIZE);
+    if (conn->send_msg_pool == NULL) {
+        pr_err("error on krdma_alloc_msg_pool\n");
         goto out;
     }
 
@@ -1155,9 +1195,16 @@ static int krdma_cm_established_client(struct krdma_conn *conn)
         goto out;
     }
 
-    ret = krdma_post_wr(conn, KRDMA_NR_POST_RECV);
+    ret = krdma_post_wr(conn, KRDMA_RECV_WR_POOL_SIZE);
     if (ret) {
         pr_err("error on krdma_post_wr\n");
+        goto out;
+    }
+
+    conn->send_msg_pool = krdma_alloc_msg_pool(
+            conn, KRDMA_SEND_WR_POOL_SIZE, KRDMA_WR_BUF_SIZE);
+    if (conn->send_msg_pool == NULL) {
+        pr_err("error on krdma_alloc_msg_pool\n");
         goto out;
     }
 

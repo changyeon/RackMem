@@ -19,7 +19,9 @@
 #define KRDMA_CM_MAX_SEND_SGE       16
 #define KRDMA_CM_MAX_RECV_SGE       16
 
-#define KRDMA_NR_POST_RECV          16
+#define KRDMA_WR_BUF_SIZE           4096
+#define KRDMA_RECV_WR_POOL_SIZE     16
+#define KRDMA_SEND_WR_POOL_SIZE     16
 
 enum krdma_cmd {
     KRDMA_CMD_HANDSHAKE_RDMA,
