@@ -8,6 +8,8 @@
 #include <linux/workqueue.h>
 #include <linux/spinlock.h>
 
+#define KRDMA_CMD_TIMEOUT           1000
+
 #define KRDMA_CM_RETRY_COUNT        128
 #define KRDMA_CM_RNR_RETRY_COUNT    128
 
@@ -17,7 +19,7 @@
 #define KRDMA_CM_MAX_SEND_SGE       16
 #define KRDMA_CM_MAX_RECV_SGE       16
 
-#define KRDMA_CMD_TIMEOUT           100
+#define KRDMA_NR_POST_RECV          16
 
 enum krdma_cmd {
     KRDMA_CMD_HANDSHAKE_RDMA,
@@ -94,8 +96,8 @@ struct krdma_conn {
     struct krdma_qp rpc_qp;
 
     /* msg pool */
-    struct krdma_msg_pool send_msg_pool;
-    struct krdma_msg_pool recv_msg_pool;
+    struct krdma_msg_pool *send_msg_pool;
+    struct krdma_msg_pool *recv_msg_pool;
 };
 
 int krdma_cm_setup(char *server, int port, void *context);

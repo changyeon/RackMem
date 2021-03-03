@@ -196,6 +196,8 @@ static struct krdma_msg *krdma_alloc_msg(struct krdma_conn *conn, u32 size)
         goto out;
     }
 
+    DEBUG_LOG("alloc_kmsg: (%p, %p, %u)\n", conn, kmsg, size);
+
     INIT_LIST_HEAD(&kmsg->head);
     kmsg->size = size;
 
@@ -210,11 +212,13 @@ static struct krdma_msg *krdma_alloc_msg(struct krdma_conn *conn, u32 size)
     kmsg->sgl.lkey = conn->lkey;
     kmsg->sgl.length = size;
 
+    kmsg->send_wr.wr_id = (u64) kmsg;
     kmsg->send_wr.opcode = IB_WR_SEND;
     kmsg->send_wr.send_flags = IB_SEND_SIGNALED;
     kmsg->send_wr.sg_list = &kmsg->sgl;
     kmsg->send_wr.num_sge = 1;
 
+    kmsg->recv_wr.wr_id = (u64) kmsg;
     kmsg->recv_wr.sg_list = &kmsg->sgl;
     kmsg->recv_wr.num_sge = 1;
 
@@ -230,6 +234,8 @@ out:
 
 static void krdma_free_msg(struct krdma_conn *conn, struct krdma_msg *kmsg)
 {
+    DEBUG_LOG("free_kmsg: (%p, %p)\n", conn, kmsg);
+
     ib_dma_free_coherent(conn->pd->device, kmsg->size, kmsg->vaddr, kmsg->paddr);
     kfree(kmsg);
 }
@@ -268,6 +274,62 @@ static void krdma_free_mr(struct krdma_conn *conn, krdma_mr_t *kmr)
     kfree(kmr);
 }
 
+static struct krdma_msg_pool *krdma_alloc_msg_pool(struct krdma_conn *conn,
+                                                   int n, u32 size)
+{
+    int i;
+    struct krdma_msg_pool *pool;
+    struct krdma_msg *kmsg, *tmp;
+
+    DEBUG_LOG("release_alloc_pool: (%p, %d, %u)\n", conn, n, size);
+
+    pool = kzalloc(sizeof(*pool), GFP_KERNEL);
+    if (pool == NULL) {
+        pr_err("failed to allocate memory for msg pool\n");
+        goto out;
+    }
+
+    INIT_LIST_HEAD(&pool->head);
+    spin_lock_init(&pool->lock);
+
+    for (i = 0; i < n; i++) {
+        kmsg = krdma_alloc_msg(conn, size);
+        if (kmsg == NULL) {
+            pr_err("error on krdma_alloc_msg\n");
+            goto out_free_list;
+        }
+        list_add_tail(&kmsg->head, &pool->head);
+        pool->size++;
+    }
+
+    return pool;
+
+out_free_list:
+    list_for_each_entry_safe(kmsg, tmp, &pool->head, head) {
+        list_del_init(&kmsg->head);
+        krdma_free_msg(conn, kmsg);
+    }
+    kfree(pool);
+out:
+    return NULL;
+}
+
+static void krdma_release_msg_pool(struct krdma_conn *conn,
+                                   struct krdma_msg_pool *pool)
+{
+    struct krdma_msg *kmsg, *tmp;
+
+    DEBUG_LOG("release_msg_pool: (%p, %p)\n", conn, pool);
+
+    list_for_each_entry_safe(kmsg, tmp, &pool->head, head) {
+        list_del_init(&kmsg->head);
+        krdma_free_msg(conn, kmsg);
+    }
+
+    kfree(pool);
+}
+
+
 static void krdma_release_work(struct work_struct *ws)
 {
     struct krdma_conn *conn;
@@ -296,6 +358,9 @@ static void krdma_release_work(struct work_struct *ws)
     DEBUG_LOG("free recv msg\n");
     krdma_free_msg(conn, conn->recv_msg);
 
+    DEBUG_LOG("free recv msg pool\n");
+    krdma_release_msg_pool(conn, conn->recv_msg_pool);
+
     DEBUG_LOG("dealloc pd\n");
     ib_dealloc_pd(conn->pd);
 
@@ -321,69 +386,90 @@ static void add_krdma_node(struct krdma_conn *conn)
     spin_unlock(&ht_lock);
 }
 
-static void rpc_handler_request_node_name(struct krdma_conn *conn)
+static int rpc_handler_request_node_name(struct krdma_conn *conn,
+                                         struct krdma_msg *recv_msg)
 {
-    char *dst;
-    struct krdma_msg_fmt *send_msg;
-    struct krdma_msg_fmt *recv_msg;
+    int ret = 0;
+    const struct ib_send_wr *bad_send_wr;
+    struct krdma_msg *send_msg;
+    struct krdma_msg_fmt *recv_buf;
+    struct krdma_msg_fmt *send_buf;
+    char *src, *dst;
+
+    send_msg = krdma_alloc_msg(conn, 4096);
+    if (send_msg == NULL) {
+        pr_err("error krdma_alloc_msg\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    send_buf = (struct krdma_msg_fmt *) send_msg->vaddr;
+    recv_buf = (struct krdma_msg_fmt *) recv_msg->vaddr;
+
+    send_buf->cmd = KRDMA_CMD_RESPONSE_NODE_NAME;
+    send_buf->arg1 = recv_buf->arg1;
+    send_buf->arg2 = recv_buf->arg2;
 
     DEBUG_LOG("write the node name to the buffer\n");
+    src = g_nodename;
+    dst = (char *) &send_buf->arg3;
+    strncpy(dst, src, __NEW_UTS_LEN + 1);
 
-    send_msg = (struct krdma_msg_fmt *) conn->send_msg->vaddr;
-    recv_msg = (struct krdma_msg_fmt *) conn->recv_msg->vaddr;
+    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr,
+                       &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
 
-    send_msg->cmd = KRDMA_CMD_RESPONSE_NODE_NAME;
-    send_msg->arg1 = recv_msg->arg1;
-    send_msg->arg2 = recv_msg->arg2;
-
-    dst = (char *) &send_msg->arg3;
-    strncpy(dst, g_nodename, __NEW_UTS_LEN + 1);
-
-    DEBUG_LOG("written node name: %s\n", dst);
+    return 0;
+out:
+    return ret;
 }
 
-static void rpc_handler_response_node_name(struct krdma_conn *conn)
+static int rpc_handler_response_node_name(struct krdma_conn *conn,
+                                          struct krdma_msg *recv_msg)
 {
     struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *recv_msg;
+    struct krdma_msg_fmt *recv_buf;
     char *dst, *src;
 
-    recv_msg = (struct krdma_msg_fmt *) conn->recv_msg->vaddr;
+    recv_buf = (struct krdma_msg_fmt *) recv_msg->vaddr;
 
-    dst = (char *) recv_msg->arg1;
-    src = (char *) &recv_msg->arg3;
+    dst = (char *) recv_buf->arg1;
+    src = (char *) &recv_buf->arg3;
 
     DEBUG_LOG("remote node name: dst: %s, src: %s\n", dst, src);
     strncpy(dst, src, __NEW_UTS_LEN + 1);
 
-    send_msg = (struct krdma_msg *) recv_msg->arg2;
+    send_msg = (struct krdma_msg *) recv_buf->arg2;
     DEBUG_LOG("comelete the waiter: %p\n", send_msg);
     complete(&send_msg->done);
+
+    return 0;
 }
 
-static int krdma_rpc_execute(struct krdma_conn *conn)
+static int krdma_rpc_execute(struct krdma_conn *conn,
+                             struct krdma_msg *recv_msg)
 {
     int ret = 0;
-    struct krdma_msg_fmt *recv_msg = conn->recv_msg->vaddr;
-    const struct ib_send_wr *send_wr = &conn->send_msg->send_wr;
-    const struct ib_send_wr *bad_send_wr;
+    struct krdma_msg_fmt *msg = (struct krdma_msg_fmt *) recv_msg->vaddr;
 
     DEBUG_LOG("rpc_execute (%s, %llu, %llu, %llu)\n",
-              krdma_cmds[recv_msg->cmd], recv_msg->arg1, recv_msg->arg2,
-              recv_msg->arg3);
+            krdma_cmds[msg->cmd], msg->arg1, msg->arg2, msg->arg3);
 
-    switch (recv_msg->cmd) {
+    switch (msg->cmd) {
         case KRDMA_CMD_REQUEST_NODE_NAME:
-            rpc_handler_request_node_name(conn);
-            ret = ib_post_send(conn->rpc_qp.qp, send_wr, &bad_send_wr);
-            if (ret) {
-                pr_err("error on ib_post_send: %d\n", ret);
-                goto out;
-            }
+            ret = rpc_handler_request_node_name(conn, recv_msg);
             break;
         case KRDMA_CMD_RESPONSE_NODE_NAME:
-            rpc_handler_response_node_name(conn);
+            ret = rpc_handler_response_node_name(conn, recv_msg);
             break;
+    }
+
+    if (ret) {
+        pr_err("error on rpc_handler: %s\n", krdma_cmds[msg->cmd]);
+        goto out;
     }
 
     return 0;
@@ -397,9 +483,10 @@ static int handle_msg(struct krdma_conn *conn, struct ib_wc *wc)
     int ret;
     bool post_recv = false;
     const struct ib_recv_wr *bad_recv_wr = NULL;
+    struct krdma_msg *kmsg = (struct krdma_msg *) wc->wr_id;
 
-    DEBUG_LOG("cq completion (%s, %s)\n", wc_opcodes[wc->opcode],
-              ib_wc_status_msg(wc->status));
+    DEBUG_LOG("cq completion (%s, %s, %p)\n", wc_opcodes[wc->opcode],
+              ib_wc_status_msg(wc->status), kmsg);
 
     switch (wc->status) {
     case IB_WC_SUCCESS:
@@ -412,6 +499,10 @@ static int handle_msg(struct krdma_conn *conn, struct ib_wc *wc)
 
     switch (wc->opcode) {
     case IB_WC_SEND:
+        if (kmsg) {
+            krdma_free_msg(conn, kmsg);
+        }
+        break;
     case IB_WC_RDMA_WRITE:
     case IB_WC_RDMA_READ:
     case IB_WC_COMP_SWAP:
@@ -423,7 +514,7 @@ static int handle_msg(struct krdma_conn *conn, struct ib_wc *wc)
     case IB_WC_MASKED_FETCH_ADD:
         break;
     case IB_WC_RECV:
-        ret = krdma_rpc_execute(conn);
+        ret = krdma_rpc_execute(conn, kmsg);
         if (ret) {
             pr_err("error on krdma_rpc_execute\n");
             break;
@@ -440,8 +531,7 @@ static int handle_msg(struct krdma_conn *conn, struct ib_wc *wc)
     }
 
     if (post_recv) {
-        ret = ib_post_recv(conn->rpc_qp.qp, &conn->recv_msg->recv_wr,
-                &bad_recv_wr);
+        ret = ib_post_recv(conn->rpc_qp.qp, &kmsg->recv_wr, &bad_recv_wr);
         if (ret) {
             pr_err("error on ib_post_recv: %d\n", ret);
             goto out;
@@ -854,6 +944,7 @@ static int krdma_get_node_name(struct krdma_conn *conn, char *dst)
     msg->arg3 = 0ULL;
 
     DEBUG_LOG("krdma_get_node_name post send\n");
+    send_msg->send_wr.wr_id = 0ULL;
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
     if (ret) {
         pr_err("error on ib_post_send: %d\n", ret);
@@ -868,8 +959,8 @@ static int krdma_get_node_name(struct krdma_conn *conn, char *dst)
         goto out_free_kmsg;
     }
 
-    DEBUG_LOG("krdma_get_node_name completed free the message\n");
     krdma_free_msg(conn, send_msg);
+    DEBUG_LOG("krdma_get_node_name completed free the message\n");
 
     return 0;
 
@@ -879,35 +970,119 @@ out:
     return ret;
 }
 
-static int krdma_cm_established_server(struct krdma_conn *conn)
+static int krdma_post_wr(struct krdma_conn *conn, int n)
 {
-    int ret = 0;
+    int ret;
+    struct krdma_msg *recv_msg = NULL;
+    const struct ib_recv_wr *bad_recv_wr;
+    struct krdma_msg_pool *pool;
+
+    pool = krdma_alloc_msg_pool(conn, n, 4096);
+    if (pool == NULL) {
+        pr_err("error on krdma_alloc_msg_pool\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    DEBUG_LOG("allocate rpc_qp recv pool: %u\n", pool->size);
+
+    list_for_each_entry(recv_msg, &pool->head, head) {
+        DEBUG_LOG("post rpc_qp recv: %p\n", recv_msg);
+        ret = ib_post_recv(conn->rpc_qp.qp, &recv_msg->recv_wr, &bad_recv_wr);
+        if (ret) {
+            pr_err("error on ib_post_recv: %d\n", ret);
+            goto out_free_msg_pool;
+        }
+    }
+
+    conn->recv_msg_pool = pool;
+
+    return 0;
+
+out_free_msg_pool:
+    krdma_release_msg_pool(conn, pool);
+out:
+    return ret;
+}
+
+static void handshake_server(struct krdma_conn *conn)
+{
+    int ret;
     const struct ib_send_wr *bad_send_wr;
     const struct ib_recv_wr *bad_recv_wr;
     const struct ib_send_wr *send_wr = &conn->send_msg->send_wr;
     const struct ib_recv_wr *recv_wr = &conn->recv_msg->recv_wr;
+
+    /* poll recv */
+    krdma_poll_cq_one(conn->rdma_qp.cq);
+
+    ret = ib_post_recv(conn->rdma_qp.qp, recv_wr, &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        goto out;
+    }
+
+    ret = ib_post_send(conn->rdma_qp.qp, send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
+
+    /* poll send */
+    krdma_poll_cq_one(conn->rdma_qp.cq);
+
+out:
+    return;
+}
+
+static void handshake_client(struct krdma_conn *conn)
+{
+    int ret;
+    const struct ib_send_wr *bad_send_wr;
+    const struct ib_recv_wr *bad_recv_wr;
+    const struct ib_send_wr *send_wr = &conn->send_msg->send_wr;
+    const struct ib_recv_wr *recv_wr = &conn->recv_msg->recv_wr;
+
+    ret = ib_post_send(conn->rdma_qp.qp, send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
+
+    /* poll send */
+    krdma_poll_cq_one(conn->rdma_qp.cq);
+
+    /* poll recv */
+    krdma_poll_cq_one(conn->rdma_qp.cq);
+
+    ret = ib_post_recv(conn->rdma_qp.qp, recv_wr, &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        goto out;
+    }
+
+out:
+    return;
+}
+
+static int krdma_cm_established_server(struct krdma_conn *conn)
+{
+    int ret = 0;
     struct krdma_msg_fmt *msg;
 
     /* create an additional QP for rpc */
     ret = allocate_rpc_qp(conn);
     if (ret) {
         pr_err("error on allocate_rpc_qp: %d\n", ret);
-        goto out_disconnect;
+        goto out;
     }
 
-    /* receive QP information from the client */
-    krdma_poll_cq_one(conn->rdma_qp.cq);
+    ret = krdma_post_wr(conn, KRDMA_NR_POST_RECV);
+    if (ret) {
+        pr_err("error on krdma_post_wr\n");
+        goto out;
+    }
 
-    msg = (struct krdma_msg_fmt *) conn->recv_msg->vaddr;
-    conn->rpc_qp.remote_qpn = msg->arg1;
-    conn->rpc_qp.remote_psn = msg->arg2;
-    conn->rpc_qp.remote_lid = msg->arg3;
-
-    DEBUG_LOG("remote_qpn: %u, remote_psn: %u, remote_lid: %u\n",
-              conn->rpc_qp.remote_qpn, conn->rpc_qp.remote_psn,
-              conn->rpc_qp.remote_lid);
-
-    /* send QP information to the client */
     conn->rpc_qp.local_qpn = conn->rpc_qp.qp->qp_num;
     conn->rpc_qp.local_psn = get_random_int() & 0xFFFFFF;
     conn->rpc_qp.local_lid = conn->rpc_qp.qp->port;
@@ -922,28 +1097,28 @@ static int krdma_cm_established_server(struct krdma_conn *conn)
     msg->arg2 = conn->rpc_qp.local_psn;
     msg->arg3 = conn->rpc_qp.local_lid;
 
-    ret = ib_post_send(conn->rdma_qp.qp, send_wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send: %d\n", ret);
-        goto out;
-    }
-    krdma_poll_cq_one(conn->rdma_qp.cq);
+    handshake_server(conn);
 
-    ret = ib_post_recv(conn->rpc_qp.qp, recv_wr, &bad_recv_wr);
-    if (ret) {
-        pr_err("error on ib_post_recv: %d\n", ret);
-        goto out_disconnect;
-    }
+    msg = (struct krdma_msg_fmt *) conn->recv_msg->vaddr;
+    conn->rpc_qp.remote_qpn = msg->arg1;
+    conn->rpc_qp.remote_psn = msg->arg2;
+    conn->rpc_qp.remote_lid = msg->arg3;
+
+    DEBUG_LOG("remote_qpn: %u, remote_psn: %u, remote_lid: %u\n",
+              conn->rpc_qp.remote_qpn, conn->rpc_qp.remote_psn,
+              conn->rpc_qp.remote_lid);
 
     /* connect the rpc QP */
     ret = connect_rpc_qp(conn);
     if (ret) {
         pr_err("error on connect_rpc_qp: %d\n", ret);
-        goto out_disconnect;
+        goto out;
     }
 
+    handshake_server(conn);
+
     /* update the remote node name and add it to the node hash table */
-    strncpy(conn->nodename, "test", __NEW_UTS_LEN + 1);
+    krdma_get_node_name(conn, conn->nodename);
     add_krdma_node(conn);
 
     /*
@@ -955,7 +1130,7 @@ static int krdma_cm_established_server(struct krdma_conn *conn)
 
     return 0;
 
-out_disconnect:
+out:
     pr_err("failed to establish the connection: %p\n", conn);
 
     /*
@@ -964,27 +1139,28 @@ out_disconnect:
      */
     add_krdma_node(conn);
     rdma_disconnect(conn->cm_id);
-out:
+
     return ret;
 }
 
 static int krdma_cm_established_client(struct krdma_conn *conn)
 {
     int ret = 0;
-    const struct ib_send_wr *bad_send_wr;
-    const struct ib_recv_wr *bad_recv_wr;
-    const struct ib_send_wr *send_wr = &conn->send_msg->send_wr;
-    const struct ib_recv_wr *recv_wr = &conn->recv_msg->recv_wr;
     struct krdma_msg_fmt *msg;
 
     /* create an additional QP for rpc */
     ret = allocate_rpc_qp(conn);
     if (ret) {
         pr_err("error on allocate_rpc_qp: %d\n", ret);
-        goto out_disconnect;
+        goto out;
     }
 
-    /* send QP information to the server */
+    ret = krdma_post_wr(conn, KRDMA_NR_POST_RECV);
+    if (ret) {
+        pr_err("error on krdma_post_wr\n");
+        goto out;
+    }
+
     conn->rpc_qp.local_qpn = conn->rpc_qp.qp->qp_num;
     conn->rpc_qp.local_psn = get_random_int() & 0xFFFFFF;
     conn->rpc_qp.local_lid = conn->rpc_qp.qp->port;
@@ -999,15 +1175,7 @@ static int krdma_cm_established_client(struct krdma_conn *conn)
     msg->arg2 = conn->rpc_qp.local_psn;
     msg->arg3 = conn->rpc_qp.local_lid;
 
-    ret = ib_post_send(conn->rdma_qp.qp, send_wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send: %d\n", ret);
-        goto out;
-    }
-    krdma_poll_cq_one(conn->rdma_qp.cq);
-
-    /* receive QP information from the server */
-    krdma_poll_cq_one(conn->rdma_qp.cq);
+    handshake_client(conn);
 
     msg = (struct krdma_msg_fmt *) conn->recv_msg->vaddr;
     conn->rpc_qp.remote_qpn = msg->arg1;
@@ -1018,21 +1186,17 @@ static int krdma_cm_established_client(struct krdma_conn *conn)
               conn->rpc_qp.remote_qpn, conn->rpc_qp.remote_psn,
               conn->rpc_qp.remote_lid);
 
-    ret = ib_post_recv(conn->rpc_qp.qp, recv_wr, &bad_recv_wr);
-    if (ret) {
-        pr_err("error on ib_post_recv: %d\n", ret);
-        goto out_disconnect;
-    }
-
     /* connect the rpc QP */
     ret = connect_rpc_qp(conn);
     if (ret) {
         pr_err("error on connect_rpc_qp: %d\n", ret);
-        goto out_disconnect;
+        goto out;
     }
 
+    handshake_client(conn);
+
     /* update the remote node name and add it to the node hash table */
-    strncpy(conn->nodename, "test", __NEW_UTS_LEN + 1);
+    krdma_get_node_name(conn, conn->nodename);
     add_krdma_node(conn);
 
     /*
@@ -1044,7 +1208,7 @@ static int krdma_cm_established_client(struct krdma_conn *conn)
 
     return 0;
 
-out_disconnect:
+out:
     pr_err("failed to establish the connection: %p\n", conn);
 
     /*
@@ -1053,7 +1217,7 @@ out_disconnect:
      */
     add_krdma_node(conn);
     rdma_disconnect(conn->cm_id);
-out:
+
     return ret;
 }
 
@@ -1332,11 +1496,6 @@ int krdma_cm_connect(char *server, int port)
     if (conn->cm_error) {
         pr_err("krdma_cm_connect error: %d\n", conn->cm_error);
         goto out_destroy_cm_id;
-    }
-
-    ret = krdma_get_node_name(conn, conn->nodename);
-    if (ret) {
-        pr_err("error on krdma_get_node_name: %d\n", ret);
     }
 
     return 0;
