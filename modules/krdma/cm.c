@@ -17,6 +17,7 @@
 
 #include "cm.h"
 #include "rpc.h"
+#include "rdma.h"
 #include <krdma.h>
 
 extern int g_debug;
@@ -262,25 +263,6 @@ static void krdma_cq_comp_handler(struct ib_cq *cq, void *ctx)
 static void krdma_cq_event_handler(struct ib_event *event, void *ctx)
 {
     DEBUG_LOG("cq_event_handler: (%s, %p)\n", ib_event_msg(event->event), ctx);
-}
-
-static int krdma_poll_cq_one(struct ib_cq *cq)
-{
-    int ret = 0;
-    struct ib_wc wc;
-
-    while (true) {
-        ret = ib_poll_cq(cq, 1, &wc);
-        if (ret < 0)
-            pr_err("error on ib_poll_cq: (%d, %d)\n", ret, wc.status);
-        if (ret == 1) {
-            DEBUG_LOG("poll cq successful: (%s, %d)\n", wc_opcodes[wc.opcode],
-                      wc.opcode);
-            break;
-        }
-    }
-
-    return 0;
 }
 
 static int allocate_global_pd(struct krdma_conn *conn)
@@ -1087,13 +1069,55 @@ out:
     return ret;
 }
 
+int test_rdma(struct krdma_conn *conn, size_t size)
+{
+    int ret = 0;
+    struct krdma_mr *kmr;
+    dma_addr_t paddr;
+    void *vaddr;
+
+    kmr = krdma_alloc_remote_memory(conn, 1048576);
+    if (kmr == NULL) {
+        pr_err("error on krdma_alloc_remote_memory\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    DEBUG_LOG("kmr size: %u, vaddr: %llu, paddr: %llu\n",
+              (u32) kmr->size, (u64) kmr->vaddr, (u64) kmr->paddr);
+
+    vaddr = ib_dma_alloc_coherent(conn->pd->device, size, &paddr, GFP_KERNEL);
+    if (vaddr == NULL) {
+        pr_err("error on ib_dma_alloc_coherent\n");
+        ret = -ENOMEM;
+        goto out_free_remote_memory;
+    }
+    DEBUG_LOG("local buf vaddr: %p, paddr: %llx\n", vaddr, paddr);
+
+    DEBUG_LOG("krdma read start\n");
+    ret = krdma_read(conn, kmr, paddr, 0, size);
+    if (ret) {
+        pr_err("error on krdma_read\n");
+        goto out_dma_free;
+    }
+    DEBUG_LOG("krdma read finished\n");
+
+    krdma_free_remote_memory(conn, kmr);
+
+out_dma_free:
+    ib_dma_free_coherent(conn->pd->device, size, vaddr, paddr);
+out_free_remote_memory:
+    krdma_free_remote_memory(conn, kmr);
+out:
+    return ret;
+}
+
 int krdma_cm_connect(char *server, int port)
 {
     int ret = 0;
     struct krdma_conn *conn;
     struct sockaddr_storage sin;
     unsigned long jiffies;
-    struct krdma_mr *kmr;
 
     conn = kzalloc(sizeof(*conn), GFP_KERNEL);
     if (conn == NULL) {
@@ -1136,20 +1160,7 @@ int krdma_cm_connect(char *server, int port)
         goto out_destroy_cm_id;
     }
 
-    kmr = krdma_alloc_remote_memory(conn, 4096);
-    DEBUG_LOG("kmr size: %u, vaddr: %llu, paddr: %llu\n",
-              (u32) kmr->size, (u64) kmr->vaddr, (u64) kmr->paddr);
-    krdma_free_remote_memory(conn, kmr);
-
-    kmr = krdma_alloc_remote_memory(conn, 65536);
-    DEBUG_LOG("kmr size: %u, vaddr: %llu, paddr: %llu\n",
-              (u32) kmr->size, (u64) kmr->vaddr, (u64) kmr->paddr);
-    krdma_free_remote_memory(conn, kmr);
-
-    kmr = krdma_alloc_remote_memory(conn, 1048576);
-    DEBUG_LOG("kmr size: %u, vaddr: %llu, paddr: %llu\n",
-              (u32) kmr->size, (u64) kmr->vaddr, (u64) kmr->paddr);
-    krdma_free_remote_memory(conn, kmr);
+    test_rdma(conn, 4096);
 
     return 0;
 

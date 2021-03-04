@@ -163,8 +163,9 @@ static int rpc_response_alloc_remote_memory(struct krdma_conn *conn,
     kmr = (struct krdma_mr *) recv_buf->arg2;
     kmr->conn = conn;
     kmr->size = recv_buf->arg3;
-    kmr->vaddr = (void *) recv_buf->arg4;
+    kmr->vaddr = recv_buf->arg4;
     kmr->paddr = (dma_addr_t) recv_buf->arg5;
+    kmr->rkey = recv_buf->arg6;
 
     complete(&send_msg->done);
 
@@ -208,6 +209,10 @@ static int rpc_request_alloc_remote_memory(struct krdma_conn *conn,
     send_buf->arg3 = recv_buf->arg3;
     send_buf->arg4 = (u64) vaddr;
     send_buf->arg5 = (u64) paddr;
+    send_buf->arg6 = (u64) conn->rkey;
+
+    DEBUG_LOG("allocate a kmr for remote access vaddr: %llu, paddr: %llu, rkey: %llu\n",
+              (u64) vaddr, (u64) paddr, (u64) conn->rkey);
 
     send_msg->send_wr.wr_id = (u64) send_msg;
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
@@ -274,6 +279,9 @@ struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u32 size)
     }
 
     krdma_put_msg(conn->send_msg_pool, send_msg);
+
+    DEBUG_LOG("got a remote memory size: %u, vaddr: %llu, paddr: %llu, rkey: %u\n",
+              kmr->size, kmr->vaddr, kmr->paddr, kmr->rkey);
 
     return kmr;
 
