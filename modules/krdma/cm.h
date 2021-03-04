@@ -23,6 +23,21 @@
 #define KRDMA_RECV_WR_POOL_SIZE     16
 #define KRDMA_SEND_WR_POOL_SIZE     16
 
+static const char * const wc_opcodes[] = {
+    [IB_WC_SEND]                = "SEND",
+    [IB_WC_RDMA_WRITE]          = "RDMA_WRITE",
+    [IB_WC_RDMA_READ]           = "RDMA_READ",
+    [IB_WC_COMP_SWAP]           = "COMP_SWAP",
+    [IB_WC_FETCH_ADD]           = "FETCH_ADD",
+    [IB_WC_LSO]                 = "LSO",
+    [IB_WC_LOCAL_INV]           = "LOCAL_INV",
+    [IB_WC_REG_MR]              = "REG_MR",
+    [IB_WC_MASKED_COMP_SWAP]    = "MASKED_COMP_SWAP",
+    [IB_WC_MASKED_FETCH_ADD]    = "MASKED_FETCH_ADD",
+    [IB_WC_RECV]                = "RECV",
+    [IB_WC_RECV_RDMA_WITH_IMM]  = "RECV_RDMA_WITH_IMM",
+};
+
 enum krdma_cmd {
     KRDMA_CMD_HANDSHAKE_RDMA,
     KRDMA_CMD_HANDSHAKE_RPC_QP,
@@ -43,12 +58,12 @@ struct krdma_msg_pool {
     spinlock_t lock;
 };
 
-typedef struct krdma_mr_t {
+struct krdma_mr_t {
     struct krdma_conn *conn;
     u32 size;
     void *vaddr;
     dma_addr_t paddr;
-} krdma_mr_t;
+};
 
 struct krdma_msg {
     struct list_head head;
@@ -104,5 +119,7 @@ struct krdma_conn {
 
 int krdma_cm_setup(char *server, int port, void *context);
 void krdma_cm_cleanup(void);
+struct krdma_msg *krdma_get_msg(struct krdma_msg_pool *pool);
+void krdma_put_msg(struct krdma_msg_pool *pool, struct krdma_msg *kmsg);
 
 #endif /* _KRDMA_CM_H_ */
