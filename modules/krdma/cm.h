@@ -8,7 +8,7 @@
 #include <linux/workqueue.h>
 #include <linux/spinlock.h>
 
-#define KRDMA_CMD_TIMEOUT           1000
+#define KRDMA_CM_TIMEOUT           1000
 
 #define KRDMA_CM_RETRY_COUNT        128
 #define KRDMA_CM_RNR_RETRY_COUNT    128
@@ -19,7 +19,7 @@
 #define KRDMA_CM_MAX_SEND_SGE       16
 #define KRDMA_CM_MAX_RECV_SGE       16
 
-#define KRDMA_WR_BUF_SIZE           4096
+#define KRDMA_MSG_BUF_SIZE          4096
 #define KRDMA_RECV_WR_POOL_SIZE     16
 #define KRDMA_SEND_WR_POOL_SIZE     16
 
@@ -36,44 +36,6 @@ static const char * const wc_opcodes[] = {
     [IB_WC_MASKED_FETCH_ADD]    = "MASKED_FETCH_ADD",
     [IB_WC_RECV]                = "RECV",
     [IB_WC_RECV_RDMA_WITH_IMM]  = "RECV_RDMA_WITH_IMM",
-};
-
-enum krdma_cmd {
-    KRDMA_CMD_HANDSHAKE_RDMA,
-    KRDMA_CMD_HANDSHAKE_RPC_QP,
-    KRDMA_CMD_REQUEST_NODE_NAME,
-    KRDMA_CMD_RESPONSE_NODE_NAME
-};
-
-struct krdma_msg_fmt {
-    u64 cmd;
-    u64 arg1;
-    u64 arg2;
-    u64 arg3;
-};
-
-struct krdma_msg_pool {
-    struct list_head head;
-    u32 size;
-    spinlock_t lock;
-};
-
-struct krdma_mr_t {
-    struct krdma_conn *conn;
-    u32 size;
-    void *vaddr;
-    dma_addr_t paddr;
-};
-
-struct krdma_msg {
-    struct list_head head;
-    u32 size;
-    void *vaddr;
-    dma_addr_t paddr;
-    struct ib_sge sgl;
-    struct ib_send_wr send_wr;
-    struct ib_recv_wr recv_wr;
-    struct completion done;
 };
 
 struct krdma_qp {
@@ -119,7 +81,5 @@ struct krdma_conn {
 
 int krdma_cm_setup(char *server, int port, void *context);
 void krdma_cm_cleanup(void);
-struct krdma_msg *krdma_get_msg(struct krdma_msg_pool *pool);
-void krdma_put_msg(struct krdma_msg_pool *pool, struct krdma_msg *kmsg);
 
 #endif /* _KRDMA_CM_H_ */
