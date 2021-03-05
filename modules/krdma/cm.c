@@ -14,10 +14,8 @@
 #include <linux/delay.h>
 #include <linux/workqueue.h>
 #include <linux/random.h>
+#include <rdma/ib_verbs.h>
 
-#include "cm.h"
-#include "rpc.h"
-#include "rdma.h"
 #include <krdma.h>
 
 extern int g_debug;

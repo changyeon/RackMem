@@ -1,7 +1,12 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include "cm.h"
-#include "rpc.h"
+#include <linux/dma-mapping.h>
+#include <linux/spinlock.h>
+#include <linux/list.h>
+#include <linux/completion.h>
+#include <rdma/ib_verbs.h>
+
+#include <krdma.h>
 
 extern int g_debug;
 

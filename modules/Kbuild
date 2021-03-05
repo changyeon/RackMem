@@ -2,10 +2,10 @@ obj-m := rack_vm.o rack_block.o rack_dvs.o krdma.o
 
 ccflags-y := -I$(src)/include
 
-rack_vm-y := rack_vm/vm.o
+rack_vm-y := rack_vm/rack_vm.o
 
-rack_block-y := rack_block/block.o
+rack_block-y := rack_block/rack_block.o
 
-rack_dvs-y := rack_dvs/dvs.o
+rack_dvs-y := rack_dvs/rack_dvs.o
 
 krdma-y := krdma/krdma.o krdma/cm.o krdma/ioctl.o krdma/dbgfs.o krdma/rpc.o krdma/rdma.o

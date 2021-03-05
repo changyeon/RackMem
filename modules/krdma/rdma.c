@@ -1,6 +1,9 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include "rdma.h"
+#include <linux/completion.h>
+#include <rdma/ib_verbs.h>
+
+#include <krdma.h>
 
 extern int g_debug;
 

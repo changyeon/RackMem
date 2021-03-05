@@ -5,6 +5,18 @@ MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("RackMem distributed virtual storage");
 MODULE_AUTHOR("Changyeon Jo <changyeon@csap.snu.ac.kr>");
 
+static void dvs_read(void)
+{
+}
+
+static void dvs_write(void)
+{
+}
+
+static void dvs_alloc(void)
+{
+}
+
 static int __init rack_dvs_init(void)
 {
     int ret = 0;
