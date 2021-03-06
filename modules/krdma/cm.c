@@ -169,44 +169,31 @@ static void krdma_release_work(struct work_struct *ws)
     struct krdma_conn *conn;
 
     conn = container_of(ws, struct krdma_conn, release_work);
-    DEBUG_LOG("release connection: %s\n", conn->nodename);
+    DEBUG_LOG("start release work (%s)\n", conn->nodename);
 
     /* destroy rdma qp */
-    DEBUG_LOG("destroy rdma qp\n");
     rdma_destroy_qp(conn->cm_id);
 
     /* destroy rpc qp */
-    DEBUG_LOG("destroy rpc qp\n");
     ib_destroy_qp(conn->rpc_qp.qp);
 
-    DEBUG_LOG("destroy id\n");
     rdma_destroy_id(conn->cm_id);
 
-    DEBUG_LOG("free rdma cq\n");
     ib_destroy_cq(conn->rdma_qp.cq);
-    DEBUG_LOG("free rpc cq\n");
     ib_destroy_cq(conn->rpc_qp.cq);
 
-    DEBUG_LOG("free send msg\n");
     krdma_free_msg(conn, conn->send_msg);
-    DEBUG_LOG("free recv msg\n");
     krdma_free_msg(conn, conn->recv_msg);
 
-    DEBUG_LOG("free recv msg pool\n");
     krdma_release_msg_pool(conn, conn->recv_msg_pool);
-
-    DEBUG_LOG("free send msg pool\n");
     krdma_release_msg_pool(conn, conn->send_msg_pool);
 
-    DEBUG_LOG("dealloc pd\n");
     ib_dealloc_pd(conn->pd);
 
-    DEBUG_LOG("delete from the hash table\n");
     spin_lock(&ht_lock);
     hash_del(&conn->hn);
     spin_unlock(&ht_lock);
 
-    DEBUG_LOG("kfree connection\n");
     kfree(conn);
 }
 
@@ -232,7 +219,7 @@ static void krdma_cq_comp_handler(struct ib_cq *cq, void *ctx)
 
 static void krdma_cq_event_handler(struct ib_event *event, void *ctx)
 {
-    DEBUG_LOG("cq_event_handler: (%s, %p)\n", ib_event_msg(event->event), ctx);
+    pr_info("cq_event_handler: (%s, %p)\n", ib_event_msg(event->event), ctx);
 }
 
 static int allocate_global_pd(struct krdma_conn *conn)
@@ -294,13 +281,11 @@ static int connect_rpc_qp(struct krdma_conn *conn)
     rpc_qp_attr.pkey_index = qp_attr.pkey_index;
     rpc_qp_attr.port_num = qp_attr.port_num;
 
-    DEBUG_LOG("modify_qp: NONE -> INIT\n");
     ret = ib_modify_qp(conn->rpc_qp.qp, &rpc_qp_attr, mask);
     if (ret) {
         pr_err("error on ib_modify_qp: %d\n", ret);
         goto out;
     }
-    DEBUG_LOG("modify_qp: NONE -> INIT successful!\n");
 
     /* trasition to RTR */
     mask  = IB_QP_STATE;
@@ -320,13 +305,11 @@ static int connect_rpc_qp(struct krdma_conn *conn)
     rpc_qp_attr.max_dest_rd_atomic = qp_attr.max_dest_rd_atomic;
     rpc_qp_attr.min_rnr_timer = qp_attr.min_rnr_timer;
 
-    DEBUG_LOG("modify_qp: INIT -> RTR\n");
     ret = ib_modify_qp(conn->rpc_qp.qp, &rpc_qp_attr, mask);
     if (ret) {
         pr_err("error on ib_modify_qp: %d\n", ret);
         goto out;
     }
-    DEBUG_LOG("modify_qp: INIT -> RTR successful!\n");
 
     /* trasition to RTS */
     mask  = IB_QP_STATE;
@@ -344,13 +327,11 @@ static int connect_rpc_qp(struct krdma_conn *conn)
     rpc_qp_attr.max_rd_atomic = qp_attr.max_rd_atomic;
     rpc_qp_attr.timeout = qp_attr.timeout;
 
-    DEBUG_LOG("modify_qp: RTR -> RTS\n");
     ret = ib_modify_qp(conn->rpc_qp.qp, &rpc_qp_attr, mask);
     if (ret) {
         pr_err("error on ib_modify_qp: %d\n", ret);
         goto out;
     }
-    DEBUG_LOG("modify_qp: RTR -> RTS successful!\n");
 
     return 0;
 
@@ -505,7 +486,6 @@ static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
         pr_err("error on krdma_alloc_msg\n");
         goto out_destroy_qp;
     }
-    DEBUG_LOG("allocate a send msg buffer on the client side\n");
 
     /* setup a message buffer for recv */
     conn->recv_msg = krdma_alloc_msg(conn, PAGE_SIZE);
@@ -513,7 +493,6 @@ static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
         pr_err("error on krdma_alloc_msg\n");
         goto out_free_send_msg;
     }
-    DEBUG_LOG("allocate a recv msg buffer on the client side\n");
 
     ret = ib_post_recv(conn->rdma_qp.qp, &conn->recv_msg->recv_wr,
                        &bad_recv_wr);
@@ -521,7 +500,6 @@ static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
         pr_err("error on ib_post_recv: %d\n", ret);
         goto out_free_recv_msg;
     }
-    DEBUG_LOG("post recv on the client side\n");
 
     memset(&param, 0, sizeof(param));
     param.responder_resources = 1;
@@ -564,10 +542,7 @@ static int krdma_post_wr(struct krdma_conn *conn, int n)
         goto out;
     }
 
-    DEBUG_LOG("allocate rpc_qp recv pool: %u\n", pool->size);
-
     list_for_each_entry(recv_msg, &pool->head, head) {
-        DEBUG_LOG("post rpc_qp recv: %p\n", recv_msg);
         ret = ib_post_recv(conn->rpc_qp.qp, &recv_msg->recv_wr, &bad_recv_wr);
         if (ret) {
             pr_err("error on ib_post_recv: %d\n", ret);
@@ -711,7 +686,7 @@ static int krdma_cm_established_server(struct krdma_conn *conn)
     if (g_debug)
         print_conn(conn);
 
-    DEBUG_LOG("connection established with %s\n", conn->nodename);
+    pr_info("connection established with %s\n", conn->nodename);
 
     return 0;
 
@@ -794,7 +769,7 @@ static int krdma_cm_established_client(struct krdma_conn *conn)
     if (g_debug)
         print_conn(conn);
 
-    DEBUG_LOG("connection established with %s\n", conn->nodename);
+    pr_info("connection established with %s\n", conn->nodename);
 
     return 0;
 
@@ -846,8 +821,6 @@ static int krdma_cm_handler_server(struct rdma_cm_id *cm_id,
         break;
     }
 
-    DEBUG_LOG("cm_handler_server finished\n");
-
     return 0;
 }
 
@@ -898,7 +871,6 @@ static int krdma_cm_route_resolved(struct krdma_conn *conn)
         pr_err("error on krdma_alloc_msg\n");
         goto out_destroy_qp;
     }
-    DEBUG_LOG("allocate a send msg buffer on the client side\n");
 
     /* setup a message buffer for recv */
     conn->recv_msg = krdma_alloc_msg(conn, PAGE_SIZE);
@@ -907,7 +879,6 @@ static int krdma_cm_route_resolved(struct krdma_conn *conn)
         pr_err("error on krdma_alloc_msg\n");
         goto out_free_send_msg;
     }
-    DEBUG_LOG("allocate a recv msg buffer on the client side\n");
 
     ret = ib_post_recv(conn->rdma_qp.qp, &conn->recv_msg->recv_wr,
                        &bad_recv_wr);
@@ -915,7 +886,6 @@ static int krdma_cm_route_resolved(struct krdma_conn *conn)
         pr_err("error on ib_post_recv: %d\n", ret);
         goto out_free_recv_msg;
     }
-    DEBUG_LOG("post recv on the client side\n");
 
     memset(&param, 0, sizeof(param));
     param.responder_resources = 1;
@@ -1003,8 +973,6 @@ static int krdma_cm_handler_client(struct rdma_cm_id *cm_id,
         conn->cm_error = cm_error;
         complete(&conn->cm_done);
     }
-
-    DEBUG_LOG("cm_handler_client finished\n");
 
     return 0;
 }

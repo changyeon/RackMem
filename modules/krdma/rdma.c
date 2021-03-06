@@ -12,30 +12,30 @@ extern int g_debug;
 
 static inline int check_wc_status(struct ib_wc *wc)
 {
-    DEBUG_LOG("check_wc_status\n");
+    int ret = 0;
+
+    DEBUG_LOG("check_wc_status: %s\n", ib_wc_status_msg(wc->status));
+
     switch (wc->status) {
     case IB_WC_SUCCESS:
         break;
     default:
         pr_err("oof bad wc status %s (%s)\n", ib_wc_status_msg(wc->status),
                 wc_opcodes[wc->opcode]);
+        ret = -EINVAL;
         goto out;
     };
 
     return 0;
 
 out:
-    return 1;
+    return ret;
 }
 
 static inline int check_wc_opcode(struct ib_wc *wc)
 {
+    int ret = 0;
     u64 *completion = (u64 *) wc->wr_id;
-
-    DEBUG_LOG("check_wc_opcode\n");
-
-    if (completion == NULL)
-        return 0;
 
     switch (wc->opcode) {
     case IB_WC_RDMA_WRITE:
@@ -55,13 +55,17 @@ static inline int check_wc_opcode(struct ib_wc *wc)
     case IB_WC_RECV_RDMA_WITH_IMM:
     default:
         pr_err("%s:%d Unexpected opcode %d\n", __func__, __LINE__, wc->opcode);
+        ret = -EINVAL;
         goto out;
     }
+
+    DEBUG_LOG("check_wc_opcode: %s, wr_id: %llu\n", wc_opcodes[wc->opcode],
+              (u64) wc->wr_id);
 
     return 0;
 
 out:
-    return 1;
+    return ret;
 }
 
 int krdma_poll_completion(struct ib_cq *cq, u64 *completion)
@@ -71,32 +75,23 @@ int krdma_poll_completion(struct ib_cq *cq, u64 *completion)
 
     while (true) {
         ret = ib_poll_cq(cq, 1, &wc);
-        DEBUG_LOG("poll return: %d, (%s)\n", ret, ib_wc_status_msg(wc.status));
         if (ret < 0 || ret > 1) {
             pr_err("error on ib_poll_cq: (%d, %d)\n", ret, wc.status);
             goto err;
         }
         if (wc.opcode < 0) {
-            pr_err("Bad opcode: %d\n", wc.opcode);
+            pr_err("bad opcode: %d\n", wc.opcode);
             ret = -EINVAL;
             goto err;
         }
         if (ret == 1) {
-            DEBUG_LOG("poll cq successful: %d, id: %llu, completion: %llu\n",
-                      wc.opcode, (u64) wc.wr_id, (u64) completion);
-            DEBUG_LOG("poll cq successful: (%s, %d)\n", wc_opcodes[wc.opcode],
-                      wc.opcode);
             if (check_wc_status(&wc))
                 goto err;
             if (check_wc_opcode(&wc))
                 goto err;
         }
-        DEBUG_LOG("check completion\n");
-        if (*completion) {
-            DEBUG_LOG("poll completion successful: (%llu, %p)\n", *completion,
-                      completion);
+        if (*completion)
             break;
-        }
     }
 
     return 0;
@@ -116,11 +111,8 @@ int krdma_poll_cq_one(struct ib_cq *cq)
             pr_err("error on ib_poll_cq: (%d, %d)\n", ret, wc.status);
             goto err;
         }
-        if (ret == 1) {
-            DEBUG_LOG("poll cq successful: (%s, %d)\n", wc_opcodes[wc.opcode],
-                      wc.opcode);
+        if (ret == 1)
             break;
-        }
     }
 
     return 0;
@@ -145,7 +137,7 @@ int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst,
     sgl.lkey = conn->lkey;
     sgl.length = length;
 
-    DEBUG_LOG("rdma_%s remote_addr: %llu, offset: %llu, rkey: %u\n",
+    DEBUG_LOG("rdma_%s addr: %llu, offset: %llu, rkey: %u\n",
               (dir == READ) ? "read" : "write", kmr->paddr, offset, kmr->rkey);
 
     wr.remote_addr = kmr->paddr + offset;
