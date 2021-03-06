@@ -183,9 +183,9 @@ static void krdma_release_work(struct work_struct *ws)
     rdma_destroy_id(conn->cm_id);
 
     DEBUG_LOG("free rdma cq\n");
-    ib_free_cq(conn->rdma_qp.cq);
+    ib_destroy_cq(conn->rdma_qp.cq);
     DEBUG_LOG("free rpc cq\n");
-    ib_free_cq(conn->rpc_qp.cq);
+    ib_destroy_cq(conn->rpc_qp.cq);
 
     DEBUG_LOG("free send msg\n");
     krdma_free_msg(conn, conn->send_msg);
@@ -225,37 +225,9 @@ static void add_krdma_node(struct krdma_conn *conn)
 
 static void krdma_cq_comp_handler(struct ib_cq *cq, void *ctx)
 {
-    int ret = 0;
-    struct ib_wc wc;
     struct krdma_conn *conn = (struct krdma_conn *) ctx;
 
-    DEBUG_LOG("cq_comp_handler: (%p, %p)\n", cq, conn);
-
-    ret = ib_req_notify_cq(conn->rpc_qp.cq, IB_CQ_NEXT_COMP);
-    if (ret) {
-        pr_err("error on ib_req_notify_cq: %d\n", ret);
-        return;
-    }
-
-    while (true) {
-        ret = ib_poll_cq(conn->rpc_qp.cq, 1, &wc);
-        if (ret < 0) {
-            pr_err("error on ib_poll_cq: %s (%s)\n",
-                   ib_wc_status_msg(wc.status), wc_opcodes[wc.opcode]);
-            break;
-        }
-        if (ret == 0) {
-            DEBUG_LOG("CQ is empty\n");
-            break;
-        } else if (ret == 1) {
-            DEBUG_LOG("Got a CQ completion\n");
-            handle_msg(conn, &wc);
-        } else {
-            pr_err("Wrong number of CQ completions!\n");
-            break;
-        }
-    }
-
+    schedule_work(&conn->poll_work);
 }
 
 static void krdma_cq_event_handler(struct ib_event *event, void *ctx)
@@ -430,13 +402,13 @@ static int allocate_rpc_qp(struct krdma_conn *conn)
     if (IS_ERR(conn->rpc_qp.qp)) {
         ret = PTR_ERR(conn->rpc_qp.qp);
         pr_err("error on ib_create_qp: %d\n", ret);
-        goto out_free_cq;
+        goto out_destroy_cq;
     }
 
     return 0;
 
-out_free_cq:
-    ib_free_cq(conn->rpc_qp.cq);
+out_destroy_cq:
+    ib_destroy_cq(conn->rpc_qp.cq);
     conn->rpc_qp.cq = NULL;
 out:
     return ret;
@@ -479,15 +451,15 @@ static int allocate_rdma_qp(struct krdma_conn *conn)
     ret = rdma_create_qp(cm_id, conn->pd, &qp_attr);
     if (ret) {
         pr_err("error on rdma_create_qp: %d\n", ret);
-        goto out_free_cq;
+        goto out_destroy_cq;
     }
 
     kqp->qp = cm_id->qp;
 
     return 0;
 
-out_free_cq:
-    ib_free_cq(kqp->cq);
+out_destroy_cq:
+    ib_destroy_cq(kqp->cq);
     kqp->cq = NULL;
 out:
     return ret;
@@ -512,6 +484,7 @@ static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
 
     init_completion(&conn->cm_done);
     INIT_WORK(&conn->release_work, krdma_release_work);
+    INIT_WORK(&conn->poll_work, krdma_poll_work);
     conn->cm_id = cm_id;
 
     ret = allocate_global_pd(conn);
@@ -568,7 +541,7 @@ out_free_send_msg:
     krdma_free_msg(conn, conn->send_msg);
 out_destroy_qp:
     rdma_destroy_qp(conn->cm_id);
-    ib_free_cq(conn->rdma_qp.cq);
+    ib_destroy_cq(conn->rdma_qp.cq);
 out_dealloc_pd:
     ib_dealloc_pd(conn->pd);
 out_kfree:
@@ -905,7 +878,7 @@ static int krdma_cm_addr_resolved(struct krdma_conn *conn)
 
 out_release_qp:
     rdma_destroy_qp(conn->cm_id);
-    ib_free_cq(conn->rdma_qp.cq);
+    ib_destroy_cq(conn->rdma_qp.cq);
 out_dealloc_pd:
     ib_dealloc_pd(conn->pd);
 out:
@@ -964,7 +937,7 @@ out_free_send_msg:
     krdma_free_msg(conn, conn->send_msg);
 out_destroy_qp:
     rdma_destroy_qp(conn->cm_id);
-    ib_free_cq(conn->rdma_qp.cq);
+    ib_destroy_cq(conn->rdma_qp.cq);
     ib_dealloc_pd(conn->pd);
 
     return ret;
@@ -1067,49 +1040,6 @@ out:
     return ret;
 }
 
-int test_rdma(struct krdma_conn *conn, size_t size)
-{
-    int ret = 0;
-    struct krdma_mr *kmr;
-    dma_addr_t paddr;
-    void *vaddr;
-
-    kmr = krdma_alloc_remote_memory(conn, 1048576);
-    if (kmr == NULL) {
-        pr_err("error on krdma_alloc_remote_memory\n");
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    DEBUG_LOG("kmr size: %u, vaddr: %llu, paddr: %llu\n",
-              (u32) kmr->size, (u64) kmr->vaddr, (u64) kmr->paddr);
-
-    vaddr = ib_dma_alloc_coherent(conn->pd->device, size, &paddr, GFP_KERNEL);
-    if (vaddr == NULL) {
-        pr_err("error on ib_dma_alloc_coherent\n");
-        ret = -ENOMEM;
-        goto out_free_remote_memory;
-    }
-    DEBUG_LOG("local buf vaddr: %p, paddr: %llx\n", vaddr, paddr);
-
-    DEBUG_LOG("krdma read start\n");
-    ret = krdma_read(conn, kmr, paddr, 0, size);
-    if (ret) {
-        pr_err("error on krdma_read\n");
-        goto out_dma_free;
-    }
-    DEBUG_LOG("krdma read finished\n");
-
-    krdma_free_remote_memory(conn, kmr);
-
-out_dma_free:
-    ib_dma_free_coherent(conn->pd->device, size, vaddr, paddr);
-out_free_remote_memory:
-    krdma_free_remote_memory(conn, kmr);
-out:
-    return ret;
-}
-
 int krdma_cm_connect(char *server, int port)
 {
     int ret = 0;
@@ -1125,6 +1055,7 @@ int krdma_cm_connect(char *server, int port)
 
     init_completion(&conn->cm_done);
     INIT_WORK(&conn->release_work, krdma_release_work);
+    INIT_WORK(&conn->poll_work, krdma_poll_work);
 
     conn->cm_id = rdma_create_id(&init_net, krdma_cm_handler_client,
                                  (void *) conn, RDMA_PS_TCP, IB_QPT_RC);
@@ -1157,8 +1088,6 @@ int krdma_cm_connect(char *server, int port)
         pr_err("krdma_cm_connect error: %d\n", conn->cm_error);
         goto out_destroy_cm_id;
     }
-
-    test_rdma(conn, 4096);
 
     return 0;
 
@@ -1247,8 +1176,19 @@ void krdma_cm_cleanup(void)
     rdma_destroy_id(krdma_cm_context.cm_id_server);
 }
 
-void krdma_test(void)
+int krdma_get_all_nodes(struct krdma_conn *nodes[], int n)
 {
-    pr_info("hello world\n");
+    int i = 0, size = 0;
+    struct krdma_conn *curr;
+
+    spin_lock(&ht_lock);
+    hash_for_each(ht_krdma_node, i, curr, hn) {
+        if (size >= n)
+            break;
+        nodes[size++] = curr;
+    }
+    spin_unlock(&ht_lock);
+
+    return size;
 }
-EXPORT_SYMBOL(krdma_test);
+EXPORT_SYMBOL(krdma_get_all_nodes);

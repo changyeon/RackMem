@@ -10,7 +10,6 @@ static int __init rack_block_init(void)
     int ret = 0;
 
     pr_info("rack_block: module loaded\n");
-    krdma_test();
 
     return ret;
 }

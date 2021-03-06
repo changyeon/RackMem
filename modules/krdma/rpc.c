@@ -4,6 +4,7 @@
 #include <linux/spinlock.h>
 #include <linux/list.h>
 #include <linux/completion.h>
+#include <linux/preempt.h>
 #include <rdma/ib_verbs.h>
 
 #include <krdma.h>
@@ -199,6 +200,7 @@ static int rpc_request_alloc_remote_memory(struct krdma_conn *conn,
         ret = -ENOMEM;
         goto out;
     }
+    DEBUG_LOG("REMOTE MEMORY DMA ALLOC (%llx, %llx)\n", (u64) vaddr, (u64) paddr);
 
     send_msg = krdma_get_msg(conn->send_msg_pool);
     if (send_msg == NULL) {
@@ -297,6 +299,7 @@ out_put_msg:
 out:
     return NULL;
 }
+EXPORT_SYMBOL(krdma_alloc_remote_memory);
 
 static int rpc_response_free_remote_memory(struct krdma_conn *conn,
                                             struct krdma_msg *recv_msg)
@@ -342,6 +345,7 @@ static int rpc_request_free_remote_memory(struct krdma_conn *conn,
     vaddr = (void *) recv_buf->arg3;
     paddr = (dma_addr_t) recv_buf->arg4;
 
+    DEBUG_LOG("REMOTE MEMORY DMA FREE (%llx, %llx)\n", (u64) vaddr, (u64) paddr);
     ib_dma_free_coherent(conn->pd->device, size, vaddr, paddr);
 
     send_msg = krdma_get_msg(conn->send_msg_pool);
@@ -424,6 +428,7 @@ out:
 
     return ret;
 }
+EXPORT_SYMBOL(krdma_free_remote_memory);
 
 static int rpc_request_node_name(struct krdma_conn *conn,
                                  struct krdma_msg *recv_msg)
@@ -546,7 +551,7 @@ out:
     return ret;
 }
 
-int krdma_rpc_execute(struct krdma_conn *conn, struct krdma_msg *recv_msg)
+static int krdma_rpc_handler(struct krdma_conn *conn, struct krdma_msg *recv_msg)
 {
     int ret = 0;
     struct krdma_msg_fmt *msg = (struct krdma_msg_fmt *) recv_msg->vaddr;
@@ -586,7 +591,7 @@ out:
     return ret;
 }
 
-int handle_msg(struct krdma_conn *conn, struct ib_wc *wc)
+static int process_completion(struct krdma_conn *conn, struct ib_wc *wc)
 {
     int ret;
     bool post_recv = false;
@@ -595,6 +600,9 @@ int handle_msg(struct krdma_conn *conn, struct ib_wc *wc)
 
     DEBUG_LOG("cq completion (%s, %s, %p)\n", wc_opcodes[wc->opcode],
               ib_wc_status_msg(wc->status), kmsg);
+    DEBUG_LOG("irq: %lu, softirq: %lu, interrupt: %lu, serving_softirq: %lu, "
+              "nmi: %lu, task: %d\n", in_irq(), in_softirq(), in_interrupt(),
+              in_serving_softirq(), in_nmi(), in_task());
 
     switch (wc->status) {
     case IB_WC_SUCCESS:
@@ -621,9 +629,9 @@ int handle_msg(struct krdma_conn *conn, struct ib_wc *wc)
     case IB_WC_MASKED_FETCH_ADD:
         break;
     case IB_WC_RECV:
-        ret = krdma_rpc_execute(conn, kmsg);
+        ret = krdma_rpc_handler(conn, kmsg);
         if (ret) {
-            pr_err("error on krdma_rpc_execute\n");
+            pr_err("error on krdma_rpc_handler\n");
             break;
         }
         post_recv = true;
@@ -648,4 +656,41 @@ int handle_msg(struct krdma_conn *conn, struct ib_wc *wc)
 
 out:
     return -1;
+}
+
+void krdma_poll_work(struct work_struct *ws)
+{
+    int ret = 0;
+    struct krdma_conn *conn;
+    struct ib_cq *cq;
+    struct ib_wc wc;
+
+    conn = container_of(ws, struct krdma_conn, poll_work);
+    cq = conn->rpc_qp.cq;
+
+    DEBUG_LOG("cq_comp_handler: (%p, %p)\n", cq, conn);
+
+    while (true) {
+        ret = ib_poll_cq(conn->rpc_qp.cq, 1, &wc);
+        if (ret < 0) {
+            pr_err("error on ib_poll_cq: %s (%s)\n",
+                   ib_wc_status_msg(wc.status), wc_opcodes[wc.opcode]);
+            break;
+        }
+        if (ret == 0) {
+            break;
+        } else if (ret == 1) {
+            DEBUG_LOG("Got a CQ completion\n");
+            process_completion(conn, &wc);
+            ret = ib_req_notify_cq(cq, IB_CQ_NEXT_COMP);
+            if (ret) {
+                pr_err("error on ib_req_notify_cq: %d\n", ret);
+                break;
+            }
+        } else {
+            pr_err("Wrong number of CQ completions!\n");
+            break;
+        }
+    }
+
 }

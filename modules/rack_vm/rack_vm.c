@@ -10,7 +10,6 @@ static int __init rack_vm_init(void)
     int ret = 0;
 
     pr_info("rack_vm: module loaded\n");
-    krdma_test();
 
     return ret;
 }

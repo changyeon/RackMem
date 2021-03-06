@@ -8,21 +8,6 @@
 #include <linux/workqueue.h>
 #include <linux/spinlock.h>
 
-#define KRDMA_CM_TIMEOUT           1000
-
-#define KRDMA_CM_RETRY_COUNT        128
-#define KRDMA_CM_RNR_RETRY_COUNT    128
-
-#define KRDMA_CM_MAX_CQE            128
-#define KRDMA_CM_MAX_SEND_WR        128
-#define KRDMA_CM_MAX_RECV_WR        128
-#define KRDMA_CM_MAX_SEND_SGE       16
-#define KRDMA_CM_MAX_RECV_SGE       16
-
-#define KRDMA_MSG_BUF_SIZE          4096
-#define KRDMA_RECV_WR_POOL_SIZE     16
-#define KRDMA_SEND_WR_POOL_SIZE     16
-
 static const char * const wc_opcodes[] = {
     [IB_WC_SEND]                = "SEND",
     [IB_WC_RDMA_WRITE]          = "RDMA_WRITE",
@@ -41,6 +26,16 @@ static const char * const wc_opcodes[] = {
 /*
  * CM related
  */
+#define KRDMA_CM_TIMEOUT           1000
+
+#define KRDMA_CM_RETRY_COUNT        128
+#define KRDMA_CM_RNR_RETRY_COUNT    128
+
+#define KRDMA_CM_MAX_CQE            128
+#define KRDMA_CM_MAX_SEND_WR        128
+#define KRDMA_CM_MAX_RECV_WR        128
+#define KRDMA_CM_MAX_SEND_SGE       16
+#define KRDMA_CM_MAX_RECV_SGE       16
 
 struct krdma_qp {
     struct ib_qp *qp;
@@ -64,6 +59,7 @@ struct krdma_conn {
     struct rdma_cm_id *cm_id;
     struct completion cm_done;
     struct work_struct release_work;
+    struct work_struct poll_work;
 
     /* global pd */
     struct ib_pd *pd;
@@ -90,7 +86,6 @@ int krdma_cm_connect(char *server, int port);
 /*
  * RDMA related
  */
-
 struct krdma_mr {
     struct krdma_conn *conn;
     u32 size;
@@ -101,12 +96,19 @@ struct krdma_mr {
 
 int krdma_poll_completion(struct ib_cq *cq, u64 *completion);
 int krdma_poll_cq_one(struct ib_cq *cq);
-int krdma_read(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst, u64 offset, u32 length);
-int krdma_write(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst, u64 offset, u32 length);
+
+#define krdma_read(conn, kmr, dst, offset, length) \
+    krdma_io(conn, kmr, dst, offset, length, READ)
+#define krdma_write(conn, kmr, dst, offset, length) \
+    krdma_io(conn, kmr, dst, offset, length, WRITE)
+int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst, u64 offset, u32 length, int dir);
 
 /*
  * RPC related
  */
+#define KRDMA_MSG_BUF_SIZE          4096
+#define KRDMA_RECV_WR_POOL_SIZE     16
+#define KRDMA_SEND_WR_POOL_SIZE     16
 
 enum krdma_cmd {
     KRDMA_CMD_HANDSHAKE_RDMA,
@@ -164,16 +166,17 @@ struct krdma_msg *krdma_get_msg(struct krdma_msg_pool *pool);
 void krdma_put_msg(struct krdma_msg_pool *pool, struct krdma_msg *kmsg);
 struct krdma_msg *krdma_alloc_msg(struct krdma_conn *conn, u32 size);
 void krdma_free_msg(struct krdma_conn *conn, struct krdma_msg *kmsg);
-struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u32 size);
-int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr);
 int krdma_get_node_name(struct krdma_conn *conn, char *dst);
 int krdma_rpc_execute(struct krdma_conn *conn, struct krdma_msg *recv_msg);
 int handle_msg(struct krdma_conn *conn, struct ib_wc *wc);
+void krdma_poll_work(struct work_struct *ws);
 
 /*
  * Exported APIs
  */
 void krdma_test(void);
-struct krdma_conn *krdma_get_all_nodes(void);
+int krdma_get_all_nodes(struct krdma_conn *nodes[], int n);
+struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u32 size);
+int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr);
 
 #endif /* _INCLUDE_KRDMA_H_ */

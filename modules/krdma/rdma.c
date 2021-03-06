@@ -129,8 +129,8 @@ err:
     return ret;
 }
 
-int krdma_read(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst,
-               u64 offset, u32 length)
+int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst,
+             u64 offset, u32 length, int dir)
 {
     int ret = 0;
     u64 completion = 0;
@@ -145,7 +145,8 @@ int krdma_read(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst,
     sgl.lkey = conn->lkey;
     sgl.length = length;
 
-    DEBUG_LOG("rdma_read remote_addr: %llu, rkey: %u\n", kmr->paddr + offset, kmr->rkey);
+    DEBUG_LOG("rdma_%s remote_addr: %llu, offset: %llu, rkey: %u\n",
+              (dir == READ) ? "read" : "write", kmr->paddr, offset, kmr->rkey);
 
     wr.remote_addr = kmr->paddr + offset;
     wr.rkey = kmr->rkey;
@@ -154,7 +155,7 @@ int krdma_read(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst,
     wr.wr.wr_id = (u64) &completion;
     wr.wr.sg_list = &sgl;
     wr.wr.num_sge = 1;
-    wr.wr.opcode = IB_WR_RDMA_READ;
+    wr.wr.opcode = (dir == WRITE) ? IB_WR_RDMA_WRITE : IB_WR_RDMA_READ;
     wr.wr.send_flags = IB_SEND_SIGNALED;
 
     ret = ib_post_send(conn->rdma_qp.qp, &wr.wr, &bad_send_wr);
@@ -174,47 +175,4 @@ int krdma_read(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst,
 out:
     return ret;
 }
-
-int krdma_write(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst,
-               u64 offset, u32 length)
-{
-    int ret = 0;
-    u64 completion = 0;
-    struct ib_rdma_wr wr;
-    struct ib_sge sgl;
-    const struct ib_send_wr *bad_send_wr = NULL;
-
-    memset(&wr, 0, sizeof(wr));
-    memset(&sgl, 0, sizeof(sgl));
-
-    sgl.addr = dst;
-    sgl.lkey = conn->lkey;
-    sgl.length = length;
-
-    wr.rkey = kmr->rkey;
-    wr.remote_addr = kmr->paddr + offset;
-
-    wr.wr.opcode = IB_WR_RDMA_WRITE;
-    wr.wr.next = NULL;
-    wr.wr.wr_id = (u64) &completion;
-    wr.wr.send_flags = IB_SEND_SIGNALED;
-    wr.wr.num_sge = 1;
-    wr.wr.sg_list = &sgl;
-
-    ret = ib_post_send(conn->rdma_qp.qp, &wr.wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send\n");
-        goto out;
-    }
-
-    ret = krdma_poll_completion(conn->rdma_qp.cq, &completion);
-    if (ret) {
-        pr_err("error on krdma_poll_cq\n");
-        goto out;
-    }
-
-    return 0;
-
-out:
-    return ret;
-}
+EXPORT_SYMBOL(krdma_io);
