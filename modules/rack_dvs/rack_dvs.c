@@ -1,6 +1,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
+#include <linux/timekeeping.h>
 #include <krdma.h>
 
 MODULE_LICENSE("GPL");
@@ -21,6 +22,8 @@ static int dvs_test(void)
     struct krdma_mr *kmr;
     dma_addr_t paddr;
     void *vaddr;
+    ktime_t t1, t2;
+    u64 tv, tv_sum = 0;
 
     n = krdma_get_all_nodes(nodes, 16);
 
@@ -51,15 +54,70 @@ static int dvs_test(void)
         ret = -ENOMEM;
         goto out_free_remote_memory;
     }
+
     DEBUG_LOG("local buf vaddr: %p, paddr: %llx\n", vaddr, paddr);
 
-    DEBUG_LOG("krdma read start\n");
-    ret = krdma_read(conn, kmr, paddr, 0, kmr->size);
-    if (ret) {
-        pr_err("error on krdma_read\n");
-        goto out_dma_free;
+    /* 4KB RDMA read latency */
+    tv_sum = 0;
+    for (i = 0; i < 100; i++) {
+        t1 = ktime_get_ns();
+        ret = krdma_read(conn, kmr, paddr, 0, 4096U);
+        t2 = ktime_get_ns();
+        tv = (u64) (t2 - t1);
+        tv_sum += tv;
+        if (ret) {
+            pr_err("error on krdma_read\n");
+            goto out_dma_free;
+        }
     }
-    DEBUG_LOG("krdma read finished\n");
+    pr_info("4KB RDMA read latency: %lluns\n", tv_sum / 100ULL);
+
+    /* 4KB RDMA write latency */
+    tv_sum = 0;
+    for (i = 0; i < 100; i++) {
+        t1 = ktime_get_ns();
+        ret = krdma_write(conn, kmr, paddr, 0, 4096U);
+        t2 = ktime_get_ns();
+        tv = (u64) (t2 - t1);
+        tv_sum += tv;
+        if (ret) {
+            pr_err("error on krdma_write\n");
+            goto out_dma_free;
+        }
+    }
+    pr_info("4KB RDMA write latency: %lluns\n", tv_sum / 100ULL);
+
+    /* 1MB RDMA read throughput */
+    tv_sum = 0;
+    for (i = 0; i < 100; i++) {
+        t1 = ktime_get_ns();
+        ret = krdma_read(conn, kmr, paddr, 0, 1048576U);
+        t2 = ktime_get_ns();
+        tv = (u64) (t2 - t1);
+        tv_sum += tv;
+        if (ret) {
+            pr_err("error on krdma_read\n");
+            goto out_dma_free;
+        }
+    }
+    pr_info("1MB RDMA read throughput: %lluMB/s\n",
+            1000000000ULL / (tv_sum / 100ULL));
+
+    /* 1MB RDMA write throughput */
+    tv_sum = 0;
+    for (i = 0; i < 100; i++) {
+        t1 = ktime_get_ns();
+        ret = krdma_write(conn, kmr, paddr, 0, 1048576U);
+        t2 = ktime_get_ns();
+        tv = (u64) (t2 - t1);
+        tv_sum += tv;
+        if (ret) {
+            pr_err("error on krdma_read\n");
+            goto out_dma_free;
+        }
+    }
+    pr_info("1MB RDMA write throughput: %lluMB/s\n",
+            1000000000ULL / (tv_sum / 100ULL));
 
     krdma_free_remote_memory(conn, kmr);
 
