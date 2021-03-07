@@ -267,7 +267,7 @@ struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u32 size)
     ret = wait_for_completion_timeout(
             &send_msg->done, msecs_to_jiffies(KRDMA_CM_TIMEOUT) + 1);
     if (ret == 0) {
-        pr_err("timeout in krdma_get_node_name\n");
+        pr_err("timeout in krdma_alloc_remote_memory\n");
         goto out_free_kmr;
     }
 
