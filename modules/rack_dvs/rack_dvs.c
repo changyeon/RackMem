@@ -45,7 +45,8 @@ out:
     return NULL;
 }
 
-int dvs_io(struct dvs_region *dvsr, u64 dst, u64 offset, u32 size, int dir)
+int dvs_io(struct dvs_region *dvsr, dma_addr_t dst, u64 offset, u32 size,
+           int dir)
 {
     int ret = 0;
     u64 slab_size_bytes, slab_index, slab_offset;
@@ -263,8 +264,8 @@ static int dvs_test(void)
     DEBUG_LOG("kmr size: %u, vaddr: %llu, paddr: %llu\n",
               (u32) kmr->size, (u64) kmr->vaddr, (u64) kmr->paddr);
 
-    vaddr = ib_dma_alloc_coherent(conn->pd->device, kmr->size, &paddr,
-                                  GFP_KERNEL);
+    vaddr = dma_alloc_coherent(conn->pd->device->dma_device, kmr->size, &paddr,
+                               GFP_KERNEL);
     if (vaddr == NULL) {
         pr_err("error on ib_dma_alloc_coherent\n");
         ret = -ENOMEM;
@@ -340,7 +341,7 @@ static int dvs_test(void)
     return 0;
 
 out_dma_free:
-    ib_dma_free_coherent(conn->pd->device, kmr->size, vaddr, paddr);
+    dma_free_coherent(conn->pd->device->dma_device, kmr->size, vaddr, paddr);
 out_free_remote_memory:
     krdma_free_remote_memory(conn, kmr);
 out:

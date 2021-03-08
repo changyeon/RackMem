@@ -16,19 +16,28 @@ long krdma_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 
     switch (cmd) {
     case KRDMA_IOCTL_CONNECT:
-        copy_from_user(&msg, (void __user *) arg, sizeof(msg));
+        ret = copy_from_user(&msg, (void __user *) arg, sizeof(msg));
+        if (ret) {
+            pr_err("error on copy_from_user: %ld\n", ret);
+            goto out;
+        }
         DEBUG_LOG("ioctl cmd: connect, args: (%s, %d)\n", msg.addr, msg.port);
         ret = krdma_cm_connect(msg.addr, msg.port);
         if (ret) {
             pr_err("error on krdma_cm_connect\n");
-            return -EINVAL;
+            ret = -EINVAL;
+            goto out;
         }
         break;
     case KRDMA_IOCTL_DISCONNECT:
     default:
         pr_err("unexpected ioctl cmd: %u\n", cmd);
-        return -EINVAL;
+        ret = -EINVAL;
+        goto out;
     }
 
     return 0;
+
+out:
+    return ret;
 }

@@ -77,7 +77,7 @@ static int __init krdma_init(void)
 
     if (strcmp(g_nodename, "") == 0) {
         pr_info("A nodename is not given. Use the hostname.\n");
-        strncpy(g_nodename, utsname()->nodename, sizeof(g_nodename));
+        strcpy(g_nodename, utsname()->nodename);
     }
 
     ret = krdma_cm_setup(g_server, g_port, NULL);
@@ -89,12 +89,11 @@ static int __init krdma_init(void)
 
     pr_info("module loaded: %s (%s, %d)\n", g_nodename, g_server, g_port);
 
-    return ret;
+    return 0;
 
 out_device_destroy:
     device_destroy(krdma_device_data.class,
                    MKDEV(krdma_device_data.major_number, 0));
-    class_unregister(krdma_device_data.class);
 out_class_destroy:
     class_destroy(krdma_class);
 out_unregister_chrdev:
@@ -110,7 +109,6 @@ static void __exit krdma_exit(void)
     /* destroy the character device */
     device_destroy(krdma_device_data.class,
                    MKDEV(krdma_device_data.major_number, 0));
-    class_unregister(krdma_device_data.class);
     class_destroy(krdma_device_data.class);
     unregister_chrdev(krdma_device_data.major_number, DEVICE_NAME);
 

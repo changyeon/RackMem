@@ -28,8 +28,8 @@ struct krdma_msg *krdma_alloc_msg(struct krdma_conn *conn, u32 size)
     INIT_LIST_HEAD(&kmsg->head);
     kmsg->size = size;
 
-    kmsg->vaddr = ib_dma_alloc_coherent(
-            conn->pd->device, size, &kmsg->paddr, GFP_KERNEL);
+    kmsg->vaddr = dma_alloc_coherent(
+            conn->pd->device->dma_device, size, &kmsg->paddr, GFP_KERNEL);
     if (kmsg->vaddr == NULL) {
         pr_err("failed to allocate memory for kmsg buffer\n");
         goto out_kfree;
@@ -61,7 +61,8 @@ out:
 
 void krdma_free_msg(struct krdma_conn *conn, struct krdma_msg *kmsg)
 {
-    ib_dma_free_coherent(conn->pd->device, kmsg->size, kmsg->vaddr, kmsg->paddr);
+    dma_free_coherent(conn->pd->device->dma_device, kmsg->size, kmsg->vaddr,
+                      kmsg->paddr);
     kfree(kmsg);
 }
 
@@ -185,8 +186,8 @@ static int rpc_request_alloc_remote_memory(struct krdma_conn *conn,
     recv_buf = (struct krdma_msg_fmt *) recv_msg->vaddr;
     size = (size_t) recv_buf->arg3;
 
-    vaddr = ib_dma_alloc_coherent(
-            conn->pd->device, size, &paddr, GFP_KERNEL);
+    vaddr = dma_alloc_coherent(
+            conn->pd->device->dma_device, size, &paddr, GFP_KERNEL);
     if (vaddr == NULL) {
         pr_err("failed to allocate memory for kmr buffer\n");
         ret = -ENOMEM;
@@ -221,7 +222,7 @@ static int rpc_request_alloc_remote_memory(struct krdma_conn *conn,
 out_put_msg:
     krdma_put_msg(conn->send_msg_pool, send_msg);
 out_dma_free:
-    ib_dma_free_coherent(conn->pd->device, size, vaddr, paddr);
+    dma_free_coherent(conn->pd->device->dma_device, size, vaddr, paddr);
 out:
     return ret;
 }
@@ -328,7 +329,7 @@ static int rpc_request_free_remote_memory(struct krdma_conn *conn,
     vaddr = (void *) recv_buf->arg3;
     paddr = (dma_addr_t) recv_buf->arg4;
 
-    ib_dma_free_coherent(conn->pd->device, size, vaddr, paddr);
+    dma_free_coherent(conn->pd->device->dma_device, size, vaddr, paddr);
 
     send_msg = krdma_get_msg(conn->send_msg_pool);
     if (send_msg == NULL) {
@@ -436,7 +437,7 @@ static int rpc_request_node_name(struct krdma_conn *conn,
 
     src = g_nodename;
     dst = (char *) &send_buf->arg3;
-    strncpy(dst, src, __NEW_UTS_LEN + 1);
+    strcpy(dst, src);
 
     send_msg->send_wr.wr_id = (u64) send_msg;
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr,
@@ -464,7 +465,7 @@ static int rpc_response_node_name(struct krdma_conn *conn,
     dst = (char *) recv_buf->arg1;
     src = (char *) &recv_buf->arg3;
 
-    strncpy(dst, src, __NEW_UTS_LEN + 1);
+    strcpy(dst, src);
 
     send_msg = (struct krdma_msg *) recv_buf->arg2;
     complete(&send_msg->done);

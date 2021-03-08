@@ -26,14 +26,15 @@ static const char * const wc_opcodes[] = {
 /*
  * CM related
  */
-#define KRDMA_CM_TIMEOUT           1000
+#define KRDMA_CM_TIMEOUT            1000
 
 #define KRDMA_CM_RETRY_COUNT        128
 #define KRDMA_CM_RNR_RETRY_COUNT    128
 
-#define KRDMA_CM_MAX_CQE            128
+#define KRDMA_CM_MAX_CQE            256
 #define KRDMA_CM_MAX_SEND_WR        128
 #define KRDMA_CM_MAX_RECV_WR        128
+
 #define KRDMA_CM_MAX_SEND_SGE       16
 #define KRDMA_CM_MAX_RECV_SGE       16
 

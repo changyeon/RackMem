@@ -27,9 +27,7 @@ static DEFINE_HASHTABLE(ht_krdma_node, 10);
 
 extern char g_nodename[__NEW_UTS_LEN + 1];
 
-static struct krdma_cm_context {
-    struct rdma_cm_id *cm_id_server;
-} krdma_cm_context;
+static struct rdma_cm_id *cm_id_server;
 
 static void print_device_attr(struct ib_device_attr *dev_attr)
 {
@@ -53,10 +51,9 @@ static void print_device_attr(struct ib_device_attr *dev_attr)
     pr_info("max_mr: %d\n", dev_attr->max_mr);
     pr_info("max_pd: %d\n", dev_attr->max_pd);
     pr_info("max_ah: %d\n", dev_attr->max_ah);
-    pr_info("max_fmr: %d\n", dev_attr->max_fmr);
-    pr_info("max_srq: %d\n", dev_attr->max_fmr);
-    pr_info("max_srq_wr: %d\n", dev_attr->max_fmr);
-    pr_info("max_srq_sge: %d\n", dev_attr->max_fmr);
+    pr_info("max_srq: %d\n", dev_attr->max_srq);
+    pr_info("max_srq_wr: %d\n", dev_attr->max_srq_wr);
+    pr_info("max_srq_sge: %d\n", dev_attr->max_srq_sge);
     pr_info("max_fmr_pglist: %u\n", dev_attr->max_fast_reg_page_list_len);
     pr_info("max_pkeys: %u\n", dev_attr->max_pkeys);
 }
@@ -893,7 +890,7 @@ static int krdma_cm_route_resolved(struct krdma_conn *conn)
     param.retry_count = KRDMA_CM_RETRY_COUNT;
     param.rnr_retry_count = KRDMA_CM_RNR_RETRY_COUNT;
 
-    ret = rdma_connect(conn->cm_id, &param);
+    ret = rdma_connect_locked(conn->cm_id, &param);
     if (ret) {
         pr_err("error on rdma_connect: %d\n", ret);
         goto out_free_recv_msg;
@@ -1035,6 +1032,7 @@ int krdma_cm_connect(char *server, int port)
 
     if (fill_sockaddr(&sin, AF_INET, server, port)) {
         pr_err("error on fill_sockaddr\n");
+        ret = -EINVAL;
         goto out_destroy_cm_id;
     }
 
@@ -1049,11 +1047,13 @@ int krdma_cm_connect(char *server, int port)
     ret = wait_for_completion_timeout(&conn->cm_done, jiffies);
     if (ret == 0) {
         pr_err("krdma_cm_connect timeout\n");
+        ret = -ETIMEDOUT;
         goto out_destroy_cm_id;
     }
 
     if (conn->cm_error) {
         pr_err("krdma_cm_connect error: %d\n", conn->cm_error);
+        ret = -ETIMEDOUT;
         goto out_destroy_cm_id;
     }
 
@@ -1064,7 +1064,7 @@ out_destroy_cm_id:
 out_free_conn:
     kfree(conn);
 out:
-    return -1;
+    return ret;
 }
 
 int krdma_cm_setup(char *server, int port, void *context)
@@ -1100,7 +1100,7 @@ int krdma_cm_setup(char *server, int port, void *context)
         goto out_destroy_cm_id;
     }
 
-    krdma_cm_context.cm_id_server = cm_id;
+    cm_id_server = cm_id;
 
     return 0;
 
@@ -1141,7 +1141,7 @@ void krdma_cm_cleanup(void)
     while (get_nr_live_conn() > 0)
         msleep(100);
 
-    rdma_destroy_id(krdma_cm_context.cm_id_server);
+    rdma_destroy_id(cm_id_server);
 }
 
 int krdma_get_all_nodes(struct krdma_conn *nodes[], int n)

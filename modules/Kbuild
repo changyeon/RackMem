@@ -2,7 +2,7 @@ obj-m := rack_vm.o rack_block.o rack_dvs.o krdma.o
 
 ccflags-y := -I$(src)/include
 
-rack_vm-y := rack_vm/rack_vm.o
+rack_vm-y := rack_vm/rack_vm.o rack_vm/fault.o rack_vm/region.o
 
 rack_block-y := rack_block/rack_block.o
 

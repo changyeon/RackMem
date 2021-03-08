@@ -121,7 +121,7 @@ err:
     return ret;
 }
 
-int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst,
+int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t dst,
              u64 offset, u32 length, int dir)
 {
     int ret = 0;
@@ -133,7 +133,7 @@ int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst,
     memset(&wr, 0, sizeof(wr));
     memset(&sgl, 0, sizeof(sgl));
 
-    sgl.addr = dst;
+    sgl.addr = (u64) dst;
     sgl.lkey = conn->lkey;
     sgl.length = length;
 
