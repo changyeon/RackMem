@@ -4,7 +4,7 @@ ccflags-y := -I$(src)/include
 
 rack_vm-y := rack_vm/rack_vm.o rack_vm/fault.o rack_vm/region.o
 
-rack_block-y := rack_block/rack_block.o
+rack_block-y := rack_block/main.o rack_block/zoned.o
 
 rack_dvs-y := rack_dvs/rack_dvs.o
 
