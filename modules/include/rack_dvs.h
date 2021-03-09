@@ -9,6 +9,7 @@
 
 #include <krdma.h>
 #include <linux/list.h>
+#include <linux/dma-mapping.h>
 
 struct dvs_slab{
     struct krdma_conn *conn;
@@ -30,12 +31,12 @@ struct dvs_node {
     struct krdma_conn *conn;
 };
 
-#define dvs_read(dvsr, dst, offset, size) \
-    dvs_io(dvsr, dst, offset, size, READ)
-#define dvs_write(dvsr, dst, offset, size) \
-    dvs_io(dvsr, dst, offset, size, WRITE)
+#define dvs_read(dvsr, addr, offset, size) \
+    dvs_io(dvsr, addr, offset, size, READ)
+#define dvs_write(dvsr, addr, offset, size) \
+    dvs_io(dvsr, addr, offset, size, WRITE)
 
-int dvs_io(struct dvs_region *dvsr, u64 dst, u64 offset, u32 size, int dir);
+int dvs_io(struct dvs_region *dvsr, dma_addr_t addr, u64 offset, u32 size, int dir);
 struct dvs_region *dvs_alloc_region(u64 size_mb, u64 slab_size_mb);
 void dvs_free_region(struct dvs_region *dvsr);
 

@@ -121,11 +121,11 @@ err:
     return ret;
 }
 
-int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t dst,
+int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t addr,
              u64 offset, u32 length, int dir)
 {
     int ret = 0;
-    u64 completion = 0;
+    u64 completion;
     struct ib_rdma_wr wr;
     struct ib_sge sgl;
     const struct ib_send_wr *bad_send_wr = NULL;
@@ -133,12 +133,13 @@ int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t dst,
     memset(&wr, 0, sizeof(wr));
     memset(&sgl, 0, sizeof(sgl));
 
-    sgl.addr = (u64) dst;
+    sgl.addr = (u64) addr;
     sgl.lkey = conn->lkey;
     sgl.length = length;
 
-    DEBUG_LOG("rdma_%s addr: %llu, offset: %llu, rkey: %u\n",
-              (dir == READ) ? "read" : "write", kmr->paddr, offset, kmr->rkey);
+    DEBUG_LOG("rdma_%s local_addr: %llu, remote_addr: %llu, length: %u\n",
+              (dir == READ) ? "read" : "write",
+              (u64) addr, kmr->paddr + offset, length);
 
     wr.remote_addr = kmr->paddr + offset;
     wr.rkey = kmr->rkey;
@@ -150,6 +151,7 @@ int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t dst,
     wr.wr.opcode = (dir == WRITE) ? IB_WR_RDMA_WRITE : IB_WR_RDMA_READ;
     wr.wr.send_flags = IB_SEND_SIGNALED;
 
+    completion = 0;
     ret = ib_post_send(conn->rdma_qp.qp, &wr.wr, &bad_send_wr);
     if (ret) {
         pr_err("error on ib_post_send\n");
@@ -165,6 +167,7 @@ int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t dst,
     return 0;
 
 out:
+
     return ret;
 }
 EXPORT_SYMBOL(krdma_io);

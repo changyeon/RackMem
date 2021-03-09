@@ -7,20 +7,21 @@
 #include <linux/completion.h>
 #include <linux/workqueue.h>
 #include <linux/spinlock.h>
+#include <linux/dma-mapping.h>
 
 static const char * const wc_opcodes[] = {
-    [IB_WC_SEND]                = "SEND",
-    [IB_WC_RDMA_WRITE]          = "RDMA_WRITE",
-    [IB_WC_RDMA_READ]           = "RDMA_READ",
-    [IB_WC_COMP_SWAP]           = "COMP_SWAP",
-    [IB_WC_FETCH_ADD]           = "FETCH_ADD",
-    [IB_WC_LSO]                 = "LSO",
-    [IB_WC_LOCAL_INV]           = "LOCAL_INV",
-    [IB_WC_REG_MR]              = "REG_MR",
-    [IB_WC_MASKED_COMP_SWAP]    = "MASKED_COMP_SWAP",
-    [IB_WC_MASKED_FETCH_ADD]    = "MASKED_FETCH_ADD",
-    [IB_WC_RECV]                = "RECV",
-    [IB_WC_RECV_RDMA_WITH_IMM]  = "RECV_RDMA_WITH_IMM",
+    [IB_WC_SEND]               = "SEND",
+    [IB_WC_RDMA_WRITE]         = "RDMA_WRITE",
+    [IB_WC_RDMA_READ]          = "RDMA_READ",
+    [IB_WC_COMP_SWAP]          = "COMP_SWAP",
+    [IB_WC_FETCH_ADD]          = "FETCH_ADD",
+    [IB_WC_LSO]                = "LSO",
+    [IB_WC_LOCAL_INV]          = "LOCAL_INV",
+    [IB_WC_REG_MR]             = "REG_MR",
+    [IB_WC_MASKED_COMP_SWAP]   = "MASKED_COMP_SWAP",
+    [IB_WC_MASKED_FETCH_ADD]   = "MASKED_FETCH_ADD",
+    [IB_WC_RECV]               = "RECV",
+    [IB_WC_RECV_RDMA_WITH_IMM] = "RECV_RDMA_WITH_IMM",
 };
 
 /*
@@ -98,11 +99,11 @@ struct krdma_mr {
 int krdma_poll_completion(struct ib_cq *cq, u64 *completion);
 int krdma_poll_cq_one(struct ib_cq *cq);
 
-#define krdma_read(conn, kmr, dst, offset, length) \
-    krdma_io(conn, kmr, dst, offset, length, READ)
-#define krdma_write(conn, kmr, dst, offset, length) \
-    krdma_io(conn, kmr, dst, offset, length, WRITE)
-int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, u64 dst, u64 offset, u32 length, int dir);
+#define krdma_read(conn, kmr, addr, offset, length) \
+    krdma_io(conn, kmr, addr, offset, length, READ)
+#define krdma_write(conn, kmr, addr, offset, length) \
+    krdma_io(conn, kmr, addr, offset, length, WRITE)
+int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t addr, u64 offset, u32 length, int dir);
 
 /*
  * RPC related
