@@ -223,64 +223,84 @@ static void dvs_cleanup(void)
     spin_unlock(&dvs_node_list_lock);
 }
 
-static int dvs_test_correctness(void)
+static int dvs_test(void)
 {
-    int ret = 0;
-    u64 size = 4096;
-    struct dvs_region *region;
-    void *buf = NULL, *tmp = NULL;
+    struct dvs_region *dvsr;
+    u64 i, n, offset;
     dma_addr_t addr;
+    size_t size = 1024 * MB;
+    void *buf, *tmp;
 
-    region = dvs_alloc_region(1, 1);
-    if (region == NULL) {
-        pr_err("error on dvs_alloc_region\n");
-        ret = -EINVAL;
+    dvsr = dvs_alloc_region(1024, 64ULL);
+    if (dvsr == NULL) {
+        pr_err("failed to allocated dvs region\n");
         goto out;
     }
 
-    buf = vzalloc(size);
+    buf = vmalloc(size);
     if (buf == NULL) {
-        pr_err("error on vzalloc\n");
-        goto out_free_region;
+        pr_err("buf vmalloc error\n");
+        goto out_free_dvsr;
+    }
+    tmp = vmalloc(size);
+    if (tmp == NULL) {
+        pr_err("tmp vmalloc error\n");
+        goto out_vfree_buf;
     }
     get_random_bytes(buf, size);
-
-    tmp = vzalloc(size);
-    if (tmp == NULL) {
-        pr_err("error on vzalloc\n");
-        goto out_vfree;
-    }
     memcpy(tmp, buf, size);
 
-    ret = memcmp(buf, tmp, size);
-    if (ret == 0) {
-        pr_info("[0] memcmp successful! (%llu,%d)\n", *((u64 *) buf), ret);
+    if (memcmp(tmp, buf, size)) {
+        pr_err("memcmp failed!\n");
+        goto out_vfree_tmp;
     } else {
-        pr_info("[0] memcmp failed! (%llu,%d)\n", *((u64 *) buf), ret);
+        pr_info("[0] memcmp successful!\n");
     }
 
-    addr = page_to_phys(vmalloc_to_page(buf));
-    dvs_write(region, addr, 0, size);
+    n = size / PAGE_SIZE;
+    pr_info("n: %llu\n", n);
+    for (i = 0; i < n; i++) {
+        offset = PAGE_SIZE * i;
+        addr = page_to_phys(vmalloc_to_page(buf + offset));
+        dvs_write(dvsr, addr, offset, PAGE_SIZE);
+    }
+
     memset(buf, 0, size);
-    dvs_read(region, addr, 0, size);
-    ret = memcmp(buf, tmp, 4096);
-    if (ret == 0) {
-        pr_info("[1] memcmp successful! (%llu,%d)\n", *((u64 *) buf), ret);
+
+    if (memcmp(tmp, buf, size)) {
+        pr_err("expected memcmp failed!\n");
     } else {
-        pr_info("[1] memcmp failed! (%llu,%d)\n", *((u64 *) buf), ret);
+        pr_info("[1] unexpected memcmp successful!\n");
+        goto out_vfree_tmp;
     }
 
+    for (i = 0; i < n; i++) {
+        offset = PAGE_SIZE * i;
+        addr = page_to_phys(vmalloc_to_page(buf + offset));
+        dvs_read(dvsr, addr, offset, PAGE_SIZE);
+    }
+
+    if (memcmp(tmp, buf, size)) {
+        pr_err("memcmp failed!\n");
+        goto out_vfree_tmp;
+    } else {
+        pr_info("[2] memcmp successful!\n");
+    }
+
+    dvs_free_region(dvsr);
+    vfree(tmp);
     vfree(buf);
-    dvs_free_region(region);
 
     return 0;
 
-out_vfree:
+out_vfree_tmp:
     vfree(tmp);
-out_free_region:
-    dvs_free_region(region);
+out_vfree_buf:
+    vfree(buf);
+out_free_dvsr:
+    dvs_free_region(dvsr);
 out:
-    return ret;
+    return -ENOMEM;
 }
 
 static int __init rack_dvs_init(void)
@@ -293,7 +313,7 @@ static int __init rack_dvs_init(void)
         goto out;
     }
 
-    ret = dvs_test_correctness();
+    ret = dvs_test();
     if (ret) {
         pr_err("error on dvs_test_io\n");
     }

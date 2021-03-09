@@ -286,7 +286,7 @@ out:
 EXPORT_SYMBOL(krdma_alloc_remote_memory);
 
 static int rpc_response_free_remote_memory(struct krdma_conn *conn,
-                                            struct krdma_msg *recv_msg)
+                                           struct krdma_msg *recv_msg)
 {
     int ret = 0;
     struct krdma_msg *send_msg;

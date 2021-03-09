@@ -4,7 +4,7 @@ extern int g_debug;
 
 #define DEBUG_LOG if (g_debug) pr_info
 
-int dvs_test(void)
+int dvs_test_00(void)
 {
     int i, n, ret = 0;
     struct krdma_conn *nodes[DVS_MAX_NODES];
@@ -131,8 +131,7 @@ out:
     return ret;
 }
 
-
-int dvs_test_io(void)
+int dvs_test_01(void)
 {
     int ret = 0, i, n;
     struct dvs_region *region;
@@ -182,3 +181,64 @@ out_free_region:
 out:
     return ret;
 }
+
+int dvs_test_02(void)
+{
+    int ret = 0;
+    u64 size = 4096;
+    struct dvs_region *region;
+    void *buf = NULL, *tmp = NULL;
+    dma_addr_t addr;
+
+    region = dvs_alloc_region(1, 1);
+    if (region == NULL) {
+        pr_err("error on dvs_alloc_region\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    buf = vzalloc(size);
+    if (buf == NULL) {
+        pr_err("error on vzalloc\n");
+        goto out_free_region;
+    }
+    get_random_bytes(buf, size);
+
+    tmp = vzalloc(size);
+    if (tmp == NULL) {
+        pr_err("error on vzalloc\n");
+        goto out_vfree;
+    }
+    memcpy(tmp, buf, size);
+
+    ret = memcmp(buf, tmp, size);
+    if (ret == 0) {
+        pr_info("[0] memcmp successful! (%llu,%d)\n", *((u64 *) buf), ret);
+    } else {
+        pr_info("[0] memcmp failed! (%llu,%d)\n", *((u64 *) buf), ret);
+    }
+
+    addr = page_to_phys(vmalloc_to_page(buf));
+    dvs_write(region, addr, 0, size);
+    memset(buf, 0, size);
+    dvs_read(region, addr, 0, size);
+    ret = memcmp(buf, tmp, 4096);
+    if (ret == 0) {
+        pr_info("[1] memcmp successful! (%llu,%d)\n", *((u64 *) buf), ret);
+    } else {
+        pr_info("[1] memcmp failed! (%llu,%d)\n", *((u64 *) buf), ret);
+    }
+
+    vfree(buf);
+    dvs_free_region(region);
+
+    return 0;
+
+out_vfree:
+    vfree(tmp);
+out_free_region:
+    dvs_free_region(region);
+out:
+    return ret;
+}
+
