@@ -71,6 +71,10 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
     struct rack_vm_region *region = NULL;
     struct dvs_region *dvsr;
 
+    DEBUG_LOG("rack_vm_alloc_region size_bytes: %llu, page_size: %llu "
+              "slab_size_bytes: %llu\n", size_bytes, page_size,
+              slab_size_bytes);
+
     total_size_bytes = (size_bytes / slab_size_bytes) * slab_size_bytes;
     if (size_bytes % slab_size_bytes) {
         total_size_bytes += total_size_bytes;
@@ -108,8 +112,11 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
     region->local_pages_limit = 65536; /* FIXME */
     region->local_pages = 0;
 
-    region->pages = kzalloc(
-            region->total_pages * sizeof(struct rack_vm_page), GFP_KERNEL);
+    region->pages = vzalloc(region->total_pages * sizeof(struct rack_vm_page));
+    if (region->pages == NULL) {
+        pr_err("failed to allocate memory for region->pages\n");
+        goto out_kfree_region;
+    }
     rack_vm_page_list_init(&region->active_list);
     rack_vm_page_list_init(&region->inactive_list);
     region->dvsr = dvsr;
@@ -117,6 +124,8 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
 
     return region;
 
+out_kfree_region:
+    kfree(region);
 out_dvs_free_region:
     dvs_free_region(dvsr);
 out:
@@ -125,8 +134,10 @@ out:
 
 void rack_vm_free_region(struct rack_vm_region *region)
 {
+    DEBUG_LOG("rack_vm_free_region %p\n", region);
+
     if (region->dvsr)
         dvs_free_region(region->dvsr);
-    kfree(region->pages);
+    vfree(region->pages);
     kfree(region);
 };

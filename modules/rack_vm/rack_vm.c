@@ -12,6 +12,10 @@ MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("RackMem virtual memory");
 MODULE_AUTHOR("Changyeon Jo <changyeon@csap.snu.ac.kr>");
 
+int g_debug = 0;
+module_param_named(debug, g_debug, int, 0);
+MODULE_PARM_DESC(debug, "enable debug mode");
+
 static struct rack_vm_device_data {
     int major_number;
     struct class *class;
@@ -72,7 +76,6 @@ static void __exit rack_vm_exit(void)
 {
     device_destroy(rack_vm_device_data.class,
                    MKDEV(rack_vm_device_data.major_number, 0));
-    class_unregister(rack_vm_device_data.class);
     class_destroy(rack_vm_device_data.class);
     unregister_chrdev(rack_vm_device_data.major_number, DEVICE_NAME);
 

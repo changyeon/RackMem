@@ -28,6 +28,10 @@ int rack_vm_mmap(struct file *fp, struct vm_area_struct *vma)
     page_size = PAGE_SIZE;
     slab_size_bytes = 64ULL * MB;
 
+    DEBUG_LOG("rack_vm_mmap size: %llu, page_size: %llu, "
+              "slab_size_bytes: %llu, vma: %p\n", size_bytes, page_size,
+              slab_size_bytes, vma);
+
     region = rack_vm_alloc_region(size_bytes, PAGE_SIZE, 64 * MB);
     if (region == NULL) {
         pr_err("error on rack_vm_alloc_region\n");
@@ -49,6 +53,8 @@ void rack_vm_close(struct vm_area_struct *vma)
 {
     struct rack_vm_region *region;
 
+    DEBUG_LOG("rack_vm_close vma: %p\n", vma);
+
     region = (struct rack_vm_region *) vma->vm_private_data;
     rack_vm_free_region(region);
     vma->vm_private_data = NULL;
@@ -59,6 +65,9 @@ int rack_vm_remap(struct rack_vm_region *region, struct rack_vm_page *rpage,
                   u64 fault_address, u64 page_size)
 {
     int ret;
+
+    DEBUG_LOG("rack_vm_remap region: %p, pg_index: %llu\n", region,
+              rpage->index);
 
     ret = remap_vmalloc_range_partial(region->vma, fault_address, rpage->buf,
                                       0ULL, page_size);
@@ -80,6 +89,9 @@ out:
 
 void rack_vm_unmap(struct rack_vm_region *region, struct rack_vm_page *rpage)
 {
+    DEBUG_LOG("rack_vm_unmap region: %p, pg_index: %llu\n", region,
+              rpage->index);
+
     zap_page_range(region->vma,
                    region->vma->vm_start + rpage->index * region->page_size,
                    region->page_size);
@@ -89,6 +101,8 @@ void rack_vm_unmap(struct rack_vm_region *region, struct rack_vm_page *rpage)
 void *rack_vm_reclaim(struct rack_vm_region *region)
 {
     void *buf;
+
+    DEBUG_LOG("rack_vm_reclaim region: %p\n", region);
 
     buf = vmalloc_user(region->page_size);
     if (buf == NULL) {
@@ -106,6 +120,9 @@ int rack_vm_restore(struct rack_vm_region *region, struct rack_vm_page *rpage)
 {
     int ret;
     dma_addr_t dst = page_to_phys(vmalloc_to_page(rpage->buf));
+
+    DEBUG_LOG("rack_vm_restore region: %p, pg_index: %llu\n", region,
+              rpage->index);
 
     ret = dvs_read(region->dvsr, dst, rpage->index * region->page_size,
                    region->page_size);
@@ -125,6 +142,9 @@ int rack_vm_writeback(struct rack_vm_region *region,
 {
     int ret;
     dma_addr_t dst = page_to_phys(vmalloc_to_page(rpage->buf));
+
+    DEBUG_LOG("rack_vm_writeback region: %p, pg_index: %llu\n", region,
+              rpage->index);
 
     ret = dvs_write(region->dvsr, dst, rpage->index * region->page_size,
                     region->page_size);
@@ -158,6 +178,9 @@ vm_fault_t rack_vm_fault(struct vm_fault *vmf)
     vma_size = vma->vm_end - vma->vm_start;
     vma_offset = fault_address - vma->vm_start;
     page_index = vma_offset / region->page_size;
+
+    DEBUG_LOG("rack_vm_fault vma: %p, fault_address: %llu, pg_index: %llu\n",
+              vma, fault_address, page_index);
 
     /* Step 1: Lock the rack_vm_page of the fault address */
     rpage = &region->pages[page_index];
