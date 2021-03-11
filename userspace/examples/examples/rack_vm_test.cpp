@@ -18,7 +18,7 @@ int main(void)
 {
     int ret, fd, prot, flags;
     uint64_t i, n, offset;
-    size_t length = 1024UL * MB;
+    size_t length = 128 * MB;
     void *buf;
 
     fd = open("/dev/rack_vm", O_RDWR);
@@ -42,8 +42,13 @@ int main(void)
     n = length / PAGE_SIZE;
     for (i = 0; i < n; i++) {
         offset = PAGE_SIZE * i;
-        printf("offset: %lu\n", offset);
         *((uint64_t *) (((uint64_t) buf) + offset)) = 0xabcd1234;
+        printf("offset: %lu,%lu\n", offset, *((uint64_t *) (((uint64_t) buf) + offset)));
+    }
+
+    for (i = 0; i < n; i++) {
+        offset = PAGE_SIZE * i;
+        printf("offset: %lu,%lu\n", offset, *((uint64_t *) (((uint64_t) buf) + offset)));
     }
 
     munmap(buf, length);

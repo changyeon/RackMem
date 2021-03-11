@@ -61,110 +61,12 @@ void rack_vm_close(struct vm_area_struct *vma)
 
 }
 
-int rack_vm_remap(struct rack_vm_region *region, struct rack_vm_page *rpage,
-                  u64 fault_address, u64 page_size)
-{
-    int ret;
-
-    DEBUG_LOG("rack_vm_remap region: %p, pg_index: %llu\n", region,
-              rpage->index);
-
-    ret = remap_vmalloc_range_partial(region->vma, fault_address, rpage->buf,
-                                      0ULL, page_size);
-    if (ret) {
-        pr_err("error on remap_vmalloc_range_partial: %d\n", ret);
-        goto out;
-    }
-
-    rpage->flags = RACK_VM_PAGE_ACTIVE;
-    rack_vm_page_list_add(&region->active_list, rpage);
-
-    return 0;
-
-out:
-    rpage->flags = RACK_VM_PAGE_ERROR;
-
-    return ret;
-}
-
-void rack_vm_unmap(struct rack_vm_region *region, struct rack_vm_page *rpage)
-{
-    DEBUG_LOG("rack_vm_unmap region: %p, pg_index: %llu\n", region,
-              rpage->index);
-
-    zap_page_range(region->vma,
-                   region->vma->vm_start + rpage->index * region->page_size,
-                   region->page_size);
-    rpage->flags = RACK_VM_PAGE_INACTIVE;
-}
-
-void *rack_vm_reclaim(struct rack_vm_region *region)
-{
-    void *buf;
-
-    DEBUG_LOG("rack_vm_reclaim region: %p\n", region);
-
-    buf = vmalloc_user(region->page_size);
-    if (buf == NULL) {
-        pr_err("error on vmalloc_user\n");
-        goto out;
-    }
-
-    return buf;
-
-out:
-    return NULL;
-}
-
-int rack_vm_restore(struct rack_vm_region *region, struct rack_vm_page *rpage)
-{
-    int ret;
-    dma_addr_t dst = page_to_phys(vmalloc_to_page(rpage->buf));
-
-    DEBUG_LOG("rack_vm_restore region: %p, pg_index: %llu\n", region,
-              rpage->index);
-
-    ret = dvs_read(region->dvsr, dst, rpage->index * region->page_size,
-                   region->page_size);
-    if (ret) {
-        pr_err("error on dvs_read: %d\n", ret);
-        goto out;
-    }
-
-    return 0;
-
-out:
-    return ret;
-}
-
-int rack_vm_writeback(struct rack_vm_region *region,
-                      struct rack_vm_page *rpage)
-{
-    int ret;
-    dma_addr_t dst = page_to_phys(vmalloc_to_page(rpage->buf));
-
-    DEBUG_LOG("rack_vm_writeback region: %p, pg_index: %llu\n", region,
-              rpage->index);
-
-    ret = dvs_write(region->dvsr, dst, rpage->index * region->page_size,
-                    region->page_size);
-    if (ret) {
-        pr_err("error on dvs_write: %d\n", ret);
-        goto out;
-    }
-
-    return 0;
-
-out:
-    return ret;
-}
-
 vm_fault_t rack_vm_fault(struct vm_fault *vmf)
 {
     int ret = 0;
     struct rack_vm_region *region;
     struct vm_area_struct *vma = vmf->vma;
-    u64 fault_address, vma_size, vma_offset, page_index;
+    u64 fault_address, page_index;
     struct rack_vm_page *rpage = NULL;
 
     region = (struct rack_vm_region *) vma->vm_private_data;
@@ -174,10 +76,8 @@ vm_fault_t rack_vm_fault(struct vm_fault *vmf)
     }
 
     vma = vmf->vma;
-    fault_address = vmf->address & ~((1 << PAGE_SHIFT) - 1);
-    vma_size = vma->vm_end - vma->vm_start;
-    vma_offset = fault_address - vma->vm_start;
-    page_index = vma_offset / region->page_size;
+    fault_address = (vmf->address / region->page_size) * region->page_size;
+    page_index = (fault_address - vma->vm_start) / region->page_size;
 
     DEBUG_LOG("rack_vm_fault vma: %p, fault_address: %llu, pg_index: %llu\n",
               vma, fault_address, page_index);
@@ -187,40 +87,45 @@ vm_fault_t rack_vm_fault(struct vm_fault *vmf)
     spin_lock(&rpage->lock);
 
     /* Step 2: Return here if the page has been resolved by another handler */
-    if (unlikely(rpage->flags & RACK_VM_PAGE_ACTIVE)) {
+    if (unlikely(rpage->flags & RACK_VM_PAGE_ACTIVE))
         goto success;
-    }
 
     /* Step 3: Pagefault on an inactive page, just restore the mapping */
     if (unlikely(rpage->flags & RACK_VM_PAGE_INACTIVE)) {
         rack_vm_page_list_del(&region->inactive_list, rpage);
-        ret = rack_vm_remap(region, rpage, fault_address, region->page_size);
-        if (ret) {
-            pr_err("error on rack_vm_remap\n");
-            goto out_unlock;
-        }
-        goto success;
+        goto success_remap;
     }
 
-    /* Step 4: Reclaim a page to handle this page fault */
-    rpage->buf = rack_vm_reclaim(region);
+    /* Step 4: allocate a new page if the current page count is below than
+     * the threshold */
+    rpage->buf = rack_vm_alloc_buf(region);
+    if (rpage->buf)
+        goto success_remap;
+
+    /* Step 5: Try to reclaim a page from the inactive list */
+    rpage->buf = rack_vm_reclaim_inactive(region);
+    if (rpage->buf)
+        goto success_restore;
+
+    /* Step 6: Reclaim a page from the active list */
+    rpage->buf = rack_vm_reclaim_active(region);
     if (unlikely(rpage->buf == NULL) ) {
         pr_err("failed to reclaim a page\n");
         goto out_unlock;
     }
 
-    /* Step 5: Restore the page */
-    if (rpage->flags & RACK_VM_PAGE_REMOTE) {
-        ret = rack_vm_restore(region, rpage);
-        if (ret) {
-            pr_err("failed to restore the page\n");
-            goto out_unlock;
-        }
+success_restore:
+    /* Step 7: Restore the page */
+    ret = rack_vm_restore(region, rpage);
+    if (unlikely(ret)) {
+        pr_err("failed to restore the page\n");
+        goto out_unlock;
     }
 
-    /* Step 6: Remap the page */
+success_remap:
+    /* Step 8: Remap the page */
     ret = rack_vm_remap(region, rpage, fault_address, region->page_size);
-    if (ret) {
+    if (unlikely(ret)) {
         pr_err("failed to remap the page\n");
         goto out_unlock;
     }
@@ -231,6 +136,7 @@ success:
     return VM_FAULT_NOPAGE;
 
 out_unlock:
+    rpage->flags = RACK_VM_PAGE_ERROR;
     spin_unlock(&rpage->lock);
 out:
 

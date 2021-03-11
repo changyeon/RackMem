@@ -228,7 +228,7 @@ static int dvs_test(void)
     struct dvs_region *dvsr;
     u64 i, n, offset;
     dma_addr_t addr;
-    size_t size = 1024 * MB;
+    size_t size = 128 * MB;
     void *buf, *tmp;
 
     dvsr = dvs_alloc_region(1024, 64ULL);

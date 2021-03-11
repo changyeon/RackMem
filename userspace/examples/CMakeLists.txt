@@ -6,6 +6,7 @@ project(krdma_examples
         LANGUAGES CXX)
 
 add_executable(rack_vm_test examples/rack_vm_test.cpp)
+add_executable(rack_vm_matmul examples/rack_vm_matmul.cpp)
 add_executable(remote_alloc examples/remote_alloc.cpp)
 
 target_link_libraries(remote_alloc PUBLIC libkrdma)
