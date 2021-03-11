@@ -115,6 +115,8 @@ int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t addr, u64
 enum krdma_cmd {
     KRDMA_CMD_HANDSHAKE_RDMA,
     KRDMA_CMD_HANDSHAKE_RPC_QP,
+    KRDMA_CMD_REQUEST_DUMMY,
+    KRDMA_CMD_RESPONSE_DUMMY,
     KRDMA_CMD_REQUEST_NODE_NAME,
     KRDMA_CMD_RESPONSE_NODE_NAME,
     KRDMA_CMD_REQUEST_ALLOC_REMOTE_MEMORY,
@@ -127,6 +129,8 @@ enum krdma_cmd {
 static const char * const krdma_cmds[] = {
     [KRDMA_CMD_HANDSHAKE_RDMA]               = "HANDSHAKE_RDMA",
     [KRDMA_CMD_HANDSHAKE_RPC_QP]             = "HANDSHAKE_RPC_QP",
+    [KRDMA_CMD_REQUEST_DUMMY]                = "REQUEST_DUMMY",
+    [KRDMA_CMD_RESPONSE_DUMMY]               = "RESPONSE_DUMMY",
     [KRDMA_CMD_REQUEST_NODE_NAME]            = "REQUEST_NODE_NAME",
     [KRDMA_CMD_RESPONSE_NODE_NAME]           = "RESPONSE_NODE_NAME",
     [KRDMA_CMD_REQUEST_ALLOC_REMOTE_MEMORY]  = "REQUEST_ALLOC_REMOTE_MEMORY",
@@ -169,6 +173,7 @@ void krdma_put_msg(struct krdma_msg_pool *pool, struct krdma_msg *kmsg);
 struct krdma_msg *krdma_alloc_msg(struct krdma_conn *conn, u32 size);
 void krdma_free_msg(struct krdma_conn *conn, struct krdma_msg *kmsg);
 int krdma_get_node_name(struct krdma_conn *conn, char *dst);
+int krdma_dummy_rpc(struct krdma_conn *conn);
 int krdma_rpc_execute(struct krdma_conn *conn, struct krdma_msg *recv_msg);
 int handle_msg(struct krdma_conn *conn, struct ib_wc *wc);
 void krdma_poll_work(struct work_struct *ws);
