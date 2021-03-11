@@ -27,7 +27,7 @@ static const char * const wc_opcodes[] = {
 /*
  * CM related
  */
-#define KRDMA_CM_TIMEOUT            1000
+#define KRDMA_CM_TIMEOUT            100
 
 #define KRDMA_CM_RETRY_COUNT        128
 #define KRDMA_CM_RNR_RETRY_COUNT    128
@@ -77,7 +77,6 @@ struct krdma_conn {
     struct krdma_qp rpc_qp;
 
     /* msg pool */
-    struct krdma_msg_pool *send_msg_pool;
     struct krdma_msg_pool *recv_msg_pool;
 };
 
@@ -90,7 +89,7 @@ int krdma_cm_connect(char *server, int port);
  */
 struct krdma_mr {
     struct krdma_conn *conn;
-    u32 size;
+    u64 size;
     u64 vaddr;
     dma_addr_t paddr;
     u32 rkey;
@@ -103,7 +102,7 @@ int krdma_poll_cq_one(struct ib_cq *cq);
     krdma_io(conn, kmr, addr, offset, length, READ)
 #define krdma_write(conn, kmr, addr, offset, length) \
     krdma_io(conn, kmr, addr, offset, length, WRITE)
-int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t addr, u64 offset, u32 length, int dir);
+int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t addr, u64 offset, u64 length, int dir);
 
 /*
  * RPC related
@@ -151,13 +150,13 @@ struct krdma_msg_fmt {
 
 struct krdma_msg_pool {
     struct list_head head;
-    u32 size;
+    u64 size;
     spinlock_t lock;
 };
 
 struct krdma_msg {
     struct list_head head;
-    u32 size;
+    u64 size;
     void *vaddr;
     dma_addr_t paddr;
     struct ib_sge sgl;
@@ -166,11 +165,11 @@ struct krdma_msg {
     struct completion done;
 };
 
-struct krdma_msg_pool *krdma_alloc_msg_pool(struct krdma_conn *conn, int n, u32 size);
-void krdma_release_msg_pool(struct krdma_conn *conn, struct krdma_msg_pool *pool);
+struct krdma_msg_pool *krdma_alloc_msg_pool(struct krdma_conn *conn, int n, u64 size);
+void krdma_free_msg_pool(struct krdma_conn *conn, struct krdma_msg_pool *pool);
 struct krdma_msg *krdma_get_msg(struct krdma_msg_pool *pool);
 void krdma_put_msg(struct krdma_msg_pool *pool, struct krdma_msg *kmsg);
-struct krdma_msg *krdma_alloc_msg(struct krdma_conn *conn, u32 size);
+struct krdma_msg *krdma_alloc_msg(struct krdma_conn *conn, u64 size);
 void krdma_free_msg(struct krdma_conn *conn, struct krdma_msg *kmsg);
 int krdma_get_node_name(struct krdma_conn *conn, char *dst);
 int krdma_dummy_rpc(struct krdma_conn *conn);
@@ -183,7 +182,7 @@ void krdma_poll_work(struct work_struct *ws);
  */
 void krdma_test(void);
 int krdma_get_all_nodes(struct krdma_conn *nodes[], int n);
-struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u32 size);
+struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size);
 int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr);
 
 #endif /* _INCLUDE_KRDMA_H_ */

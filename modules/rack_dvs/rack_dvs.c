@@ -47,7 +47,7 @@ out:
     return NULL;
 }
 
-int dvs_io(struct dvs_region *dvsr, dma_addr_t addr, u64 offset, u32 size,
+int dvs_io(struct dvs_region *dvsr, dma_addr_t addr, u64 offset, u64 size,
            int dir)
 {
     int ret = 0;

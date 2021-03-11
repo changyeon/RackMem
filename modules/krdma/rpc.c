@@ -15,7 +15,7 @@ extern int g_debug;
 
 extern char g_nodename[__NEW_UTS_LEN + 1];
 
-struct krdma_msg *krdma_alloc_msg(struct krdma_conn *conn, u32 size)
+struct krdma_msg *krdma_alloc_msg(struct krdma_conn *conn, u64 size)
 {
     struct krdma_msg *kmsg = NULL;
 
@@ -67,7 +67,7 @@ void krdma_free_msg(struct krdma_conn *conn, struct krdma_msg *kmsg)
 }
 
 struct krdma_msg_pool *krdma_alloc_msg_pool(struct krdma_conn *conn, int n,
-                                            u32 size)
+                                            u64 size)
 {
     int i;
     struct krdma_msg_pool *pool;
@@ -105,8 +105,7 @@ out:
     return NULL;
 }
 
-void krdma_release_msg_pool(struct krdma_conn *conn,
-                            struct krdma_msg_pool *pool)
+void krdma_free_msg_pool(struct krdma_conn *conn, struct krdma_msg_pool *pool)
 {
     struct krdma_msg *kmsg, *tmp;
 
@@ -194,9 +193,9 @@ static int rpc_request_alloc_remote_memory(struct krdma_conn *conn,
         goto out;
     }
 
-    send_msg = krdma_get_msg(conn->send_msg_pool);
+    send_msg = krdma_alloc_msg(conn, 128);
     if (send_msg == NULL) {
-        pr_err("error on krmda_get_msg\n");
+        pr_err("error on krmda_alloc_msg\n");
         ret = -ENOMEM;
         goto out_dma_free;
     }
@@ -214,13 +213,13 @@ static int rpc_request_alloc_remote_memory(struct krdma_conn *conn,
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
     if (ret) {
         pr_err("error on ib_post_send: %d\n", ret);
-        goto out_put_msg;
+        goto out_free_msg;
     }
 
     return 0;
 
-out_put_msg:
-    krdma_put_msg(conn->send_msg_pool, send_msg);
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
 out_dma_free:
     dma_free_coherent(conn->pd->device->dma_device, size, vaddr, paddr);
 out:
@@ -230,7 +229,7 @@ out:
 /**
  * Allocate remote memory
  */
-struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u32 size)
+struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size)
 {
     int ret;
     struct krdma_msg *send_msg;
@@ -238,16 +237,16 @@ struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u32 size)
     struct krdma_mr *kmr = NULL;
     const struct ib_send_wr *bad_send_wr;
 
-    send_msg = krdma_get_msg(conn->send_msg_pool);
+    send_msg = krdma_alloc_msg(conn, 128);
     if (send_msg == NULL) {
-        pr_err("error on krmda_get_msg\n");
+        pr_err("error on krmda_alloc_msg\n");
         goto out;
     }
 
     kmr = kzalloc(sizeof(*kmr), GFP_KERNEL);
     if (kmr == NULL) {
         pr_err("failed to allocate memory for kmr\n");
-        goto out_put_msg;
+        goto out_free_msg;
     }
 
     send_buf = (struct krdma_msg_fmt *) send_msg->vaddr;
@@ -272,14 +271,14 @@ struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u32 size)
         goto out_free_kmr;
     }
 
-    krdma_put_msg(conn->send_msg_pool, send_msg);
+    krdma_free_msg(conn, send_msg);
 
     return kmr;
 
 out_free_kmr:
     kfree(kmr);
-out_put_msg:
-    krdma_put_msg(conn->send_msg_pool, send_msg);
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
 out:
     return NULL;
 }
@@ -331,9 +330,9 @@ static int rpc_request_free_remote_memory(struct krdma_conn *conn,
 
     dma_free_coherent(conn->pd->device->dma_device, size, vaddr, paddr);
 
-    send_msg = krdma_get_msg(conn->send_msg_pool);
+    send_msg = krdma_alloc_msg(conn, 128);
     if (send_msg == NULL) {
-        pr_err("error on krmda_get_msg\n");
+        pr_err("error on krmda_allo_msg\n");
         ret = -ENOMEM;
         goto out;
     }
@@ -347,13 +346,13 @@ static int rpc_request_free_remote_memory(struct krdma_conn *conn,
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
     if (ret) {
         pr_err("error on ib_post_send: %d\n", ret);
-        goto out_put_msg;
+        goto out_free_msg;
     }
 
     return 0;
 
-out_put_msg:
-    krdma_put_msg(conn->send_msg_pool, send_msg);
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
 out:
     return ret;
 }
@@ -368,10 +367,10 @@ int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr)
     struct krdma_msg_fmt *send_buf;
     const struct ib_send_wr *bad_send_wr;
 
-    send_msg = krdma_get_msg(conn->send_msg_pool);
+    send_msg = krdma_alloc_msg(conn, 128);
     if (send_msg == NULL) {
         ret = -ENOMEM;
-        pr_err("error on krmda_get_msg\n");
+        pr_err("error on krmda_alloc_msg\n");
         goto out;
     }
 
@@ -398,13 +397,13 @@ int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr)
         goto out;
     }
 
-    krdma_put_msg(conn->send_msg_pool, send_msg);
+    krdma_free_msg(conn, send_msg);
     kfree(kmr);
 
     return 0;
 
 out:
-    krdma_put_msg(conn->send_msg_pool, send_msg);
+    krdma_free_msg(conn, send_msg);
     kfree(kmr);
 
     return ret;
@@ -421,9 +420,9 @@ static int rpc_request_node_name(struct krdma_conn *conn,
     struct krdma_msg_fmt *recv_buf;
     char *src, *dst;
 
-    send_msg = krdma_get_msg(conn->send_msg_pool);
+    send_msg = krdma_alloc_msg(conn, 256);
     if (send_msg == NULL) {
-        pr_err("error on krmda_get_msg\n");
+        pr_err("error on krdma_alloc_msg\n");
         ret = -ENOMEM;
         goto out;
     }
@@ -443,13 +442,13 @@ static int rpc_request_node_name(struct krdma_conn *conn,
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
     if (ret) {
         pr_err("error on ib_post_send: %d\n", ret);
-        goto out_put_msg;
+        goto out_free_msg;
     }
 
     return 0;
 
-out_put_msg:
-    krdma_put_msg(conn->send_msg_pool, send_msg);
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
 out:
     return ret;
 }
@@ -484,9 +483,9 @@ int krdma_get_node_name(struct krdma_conn *conn, char *dst)
     struct krdma_msg *send_msg;
     struct krdma_msg_fmt *msg;
 
-    send_msg = krdma_get_msg(conn->send_msg_pool);
+    send_msg = krdma_alloc_msg(conn, 256);
     if (send_msg == NULL) {
-        pr_err("error on krdma_get_msg\n");
+        pr_err("error on krdma_alloc_msg\n");
         ret = -ENOMEM;
         goto out;
     }
@@ -499,27 +498,28 @@ int krdma_get_node_name(struct krdma_conn *conn, char *dst)
     msg->arg3 = 0ULL;
 
     init_completion(&send_msg->done);
+    /* to prevent freeing this msg in the comp handler */
     send_msg->send_wr.wr_id = 0ULL;
 
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
     if (ret) {
         pr_err("error on ib_post_send: %d\n", ret);
-        goto out_put_msg;
+        goto out_free_msg;
     }
 
     ret = wait_for_completion_timeout(
             &send_msg->done, msecs_to_jiffies(KRDMA_CM_TIMEOUT) + 1);
     if (ret == 0) {
         pr_err("timeout in krdma_get_node_name\n");
-        goto out_put_msg;
+        goto out_free_msg;
     }
 
-    krdma_put_msg(conn->send_msg_pool, send_msg);
+    krdma_free_msg(conn, send_msg);
 
     return 0;
 
-out_put_msg:
-    krdma_put_msg(conn->send_msg_pool, send_msg);
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
 out:
     return ret;
 }
@@ -533,9 +533,9 @@ static int rpc_request_dummy(struct krdma_conn *conn,
     struct krdma_msg_fmt *recv_buf;
     const struct ib_send_wr *bad_send_wr;
 
-    send_msg = krdma_get_msg(conn->send_msg_pool);
+    send_msg = krdma_alloc_msg(conn, 32);
     if (send_msg == NULL) {
-        pr_err("error on krmda_get_msg\n");
+        pr_err("error on krdma_alloc_msg\n");
         ret = -ENOMEM;
         goto out;
     }
@@ -550,11 +550,13 @@ static int rpc_request_dummy(struct krdma_conn *conn,
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
     if (ret) {
         pr_err("error on ib_post_send: %d\n", ret);
-        goto out_put_msg;
+        goto out_free_msg;
     }
 
-out_put_msg:
-    krdma_put_msg(conn->send_msg_pool, send_msg);
+    return 0;
+
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
 out:
     return ret;
 }
@@ -579,9 +581,9 @@ int krdma_dummy_rpc(struct krdma_conn *conn)
     struct krdma_msg_fmt *send_buf;
     const struct ib_send_wr *bad_send_wr;
 
-    send_msg = krdma_get_msg(conn->send_msg_pool);
+    send_msg = krdma_alloc_msg(conn, 32);
     if (send_msg == NULL) {
-        pr_err("error on krmda_get_msg\n");
+        pr_err("error on krdma_alloc_msg\n");
         ret = -ENOMEM;
         goto out;
     }
@@ -596,7 +598,7 @@ int krdma_dummy_rpc(struct krdma_conn *conn)
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
     if (ret) {
         pr_err("error on ib_post_send: %d\n", ret);
-        goto out_put_msg;
+        goto out_free_msg;
     }
 
     ret = wait_for_completion_timeout(
@@ -604,15 +606,15 @@ int krdma_dummy_rpc(struct krdma_conn *conn)
     if (ret == 0) {
         pr_err("timeout in krdma_alloc_remote_memory\n");
         ret = -ETIMEDOUT;
-        goto out_put_msg;
+        goto out_free_msg;
     }
 
-    krdma_put_msg(conn->send_msg_pool, send_msg);
+    krdma_free_msg(conn, send_msg);
 
     return 0;
 
-out_put_msg:
-    krdma_put_msg(conn->send_msg_pool, send_msg);
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
 out:
     return ret;
 }
@@ -686,7 +688,7 @@ static int process_completion(struct krdma_conn *conn, struct ib_wc *wc)
     switch (wc->opcode) {
     case IB_WC_SEND:
         if (kmsg)
-            krdma_put_msg(conn->send_msg_pool, kmsg);
+            krdma_free_msg(conn, kmsg);
         break;
     case IB_WC_RDMA_WRITE:
     case IB_WC_RDMA_READ:
@@ -751,11 +753,6 @@ void krdma_poll_work(struct work_struct *ws)
             break;
         } else if (ret == 1) {
             process_completion(conn, &wc);
-            ret = ib_req_notify_cq(cq, IB_CQ_NEXT_COMP);
-            if (ret) {
-                pr_err("error on ib_req_notify_cq: %d\n", ret);
-                break;
-            }
         } else {
             pr_err("Wrong number of CQ completions!\n");
             break;

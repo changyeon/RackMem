@@ -122,7 +122,7 @@ err:
 }
 
 int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t addr,
-             u64 offset, u32 length, int dir)
+             u64 offset, u64 length, int dir)
 {
     int ret = 0;
     u64 completion;
@@ -137,7 +137,7 @@ int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t addr,
     sgl.lkey = conn->lkey;
     sgl.length = length;
 
-    DEBUG_LOG("rdma_%s local_addr: %llu, remote_addr: %llu, length: %u\n",
+    DEBUG_LOG("rdma_%s local_addr: %llu, remote_addr: %llu, length: %llu\n",
               (dir == READ) ? "read" : "write",
               (u64) addr, kmr->paddr + offset, length);
 
