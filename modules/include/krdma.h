@@ -3,6 +3,7 @@
 
 #include <rdma/rdma_cm.h>
 #include <linux/types.h>
+#include <linux/atomic.h>
 #include <linux/utsname.h>
 #include <linux/completion.h>
 #include <linux/workqueue.h>
@@ -27,7 +28,7 @@ static const char * const wc_opcodes[] = {
 /*
  * CM related
  */
-#define KRDMA_CM_TIMEOUT            100
+#define KRDMA_CM_TIMEOUT            1000
 
 #define KRDMA_CM_RETRY_COUNT        128
 #define KRDMA_CM_RNR_RETRY_COUNT    128
@@ -38,6 +39,8 @@ static const char * const wc_opcodes[] = {
 
 #define KRDMA_CM_MAX_SEND_SGE       16
 #define KRDMA_CM_MAX_RECV_SGE       16
+
+#define KRDMA_POLL_WORK_ARRAY_SIZE  8
 
 struct krdma_qp {
     struct ib_qp *qp;
@@ -52,6 +55,11 @@ struct krdma_qp {
     u32 remote_lid;
 };
 
+struct krdma_poll_work {
+    struct krdma_conn *conn;
+    struct work_struct work;
+};
+
 struct krdma_conn {
     struct hlist_node hn;
     char nodename[__NEW_UTS_LEN + 1];
@@ -61,7 +69,8 @@ struct krdma_conn {
     struct rdma_cm_id *cm_id;
     struct completion cm_done;
     struct work_struct release_work;
-    struct work_struct poll_work;
+    atomic64_t poll_work_index;
+    struct krdma_poll_work poll_work_arr[KRDMA_POLL_WORK_ARRAY_SIZE];
 
     /* global pd */
     struct ib_pd *pd;

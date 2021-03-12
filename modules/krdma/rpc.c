@@ -15,6 +15,8 @@ extern int g_debug;
 
 extern char g_nodename[__NEW_UTS_LEN + 1];
 
+static DEFINE_SPINLOCK(comp_lock);
+
 struct krdma_msg *krdma_alloc_msg(struct krdma_conn *conn, u64 size)
 {
     struct krdma_msg *kmsg = NULL;
@@ -733,29 +735,46 @@ out:
 void krdma_poll_work(struct work_struct *ws)
 {
     int ret = 0;
+    bool to_stop = false;
+    struct krdma_poll_work *poll_work;
     struct krdma_conn *conn;
     struct ib_cq *cq;
     struct ib_wc wc;
 
-    conn = container_of(ws, struct krdma_conn, poll_work);
+    spin_lock(&comp_lock);
+
+    poll_work = container_of(ws, struct krdma_poll_work, work);
+    conn = poll_work->conn;
     cq = conn->rpc_qp.cq;
 
     DEBUG_LOG("krdma_poll_work cq: %p, conn: %p\n", cq, conn);
 
     while (true) {
         ret = ib_poll_cq(conn->rpc_qp.cq, 1, &wc);
-        if (ret < 0) {
-            pr_err("error on ib_poll_cq: %s (%s)\n",
-                   ib_wc_status_msg(wc.status), wc_opcodes[wc.opcode]);
+        if (ret < 0 || ret > 1) {
+            pr_err("error on ib_poll_cq: ret: %d (%s, %s)\n",
+                   ret, ib_wc_status_msg(wc.status), wc_opcodes[wc.opcode]);
             break;
         }
+
+        if (ret == 0 && to_stop)
+            break;
+
         if (ret == 0) {
-            break;
-        } else if (ret == 1) {
+            ret = ib_req_notify_cq(cq, IB_CQ_NEXT_COMP);
+            if (ret) {
+                pr_err("error on ib_req_notify_cq: %d\n", ret);
+                break;
+            }
+            to_stop = true;
+            continue;
+        }
+
+        if (ret == 1) {
             process_completion(conn, &wc);
-        } else {
-            pr_err("Wrong number of CQ completions!\n");
-            break;
+            continue;
         }
     }
+
+    spin_unlock(&comp_lock);
 }

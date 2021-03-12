@@ -207,13 +207,12 @@ static void add_krdma_node(struct krdma_conn *conn)
 
 static void krdma_cq_comp_handler(struct ib_cq *cq, void *ctx)
 {
-    int ret;
+    s64 poll_work_index;
     struct krdma_conn *conn = (struct krdma_conn *) ctx;
 
-    ret = ib_req_notify_cq(cq, IB_CQ_NEXT_COMP);
-    if (ret)
-        pr_err("error on ib_req_notify_cq: %d\n", ret);
-    schedule_work(&conn->poll_work);
+    poll_work_index = atomic64_fetch_add(1, &conn->poll_work_index);
+    poll_work_index %= KRDMA_POLL_WORK_ARRAY_SIZE;
+    schedule_work(&conn->poll_work_arr[poll_work_index].work);
 }
 
 static void krdma_cq_event_handler(struct ib_event *event, void *ctx)
@@ -450,7 +449,7 @@ out:
  */
 static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
 {
-    int ret;
+    int i, ret;
     struct krdma_conn *conn;
     struct rdma_conn_param param;
     const struct ib_recv_wr *bad_recv_wr;
@@ -464,7 +463,13 @@ static int krdma_cm_connect_request(struct rdma_cm_id *cm_id)
 
     init_completion(&conn->cm_done);
     INIT_WORK(&conn->release_work, krdma_release_work);
-    INIT_WORK(&conn->poll_work, krdma_poll_work);
+
+    atomic64_set(&conn->poll_work_index, 0);
+    for (i = 0; i < KRDMA_POLL_WORK_ARRAY_SIZE; i++) {
+        INIT_WORK(&conn->poll_work_arr[i].work, krdma_poll_work);
+        conn->poll_work_arr[i].conn = conn;
+    }
+
     conn->cm_id = cm_id;
 
     ret = allocate_global_pd(conn);
@@ -995,7 +1000,7 @@ out:
 
 int krdma_cm_connect(char *server, int port)
 {
-    int ret = 0;
+    int i, ret = 0;
     struct krdma_conn *conn;
     struct sockaddr_storage sin;
     unsigned long jiffies;
@@ -1008,7 +1013,12 @@ int krdma_cm_connect(char *server, int port)
 
     init_completion(&conn->cm_done);
     INIT_WORK(&conn->release_work, krdma_release_work);
-    INIT_WORK(&conn->poll_work, krdma_poll_work);
+
+    atomic64_set(&conn->poll_work_index, 0);
+    for (i = 0; i < KRDMA_POLL_WORK_ARRAY_SIZE; i++) {
+        INIT_WORK(&conn->poll_work_arr[i].work, krdma_poll_work);
+        conn->poll_work_arr[i].conn = conn;
+    }
 
     conn->cm_id = rdma_create_id(&init_net, krdma_cm_handler_client,
                                  (void *) conn, RDMA_PS_TCP, IB_QPT_RC);
