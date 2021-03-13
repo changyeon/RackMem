@@ -772,6 +772,7 @@ void krdma_poll_work(struct work_struct *ws)
 
         if (ret == 1) {
             process_completion(conn, &wc);
+            to_stop = false;
             continue;
         }
     }
