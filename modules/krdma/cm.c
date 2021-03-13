@@ -1158,3 +1158,47 @@ int krdma_get_all_nodes(struct krdma_conn *nodes[], int n)
     return size;
 }
 EXPORT_SYMBOL(krdma_get_all_nodes);
+
+
+/**
+ * krdma_get_node - Returns the node associated with the given name.
+ * If a name is not given, it returns the first node in the list.
+ */
+struct krdma_conn *krdma_get_node(char *nodename)
+{
+    int bkt;
+    bool success = false;
+    unsigned int key;
+    struct krdma_conn *conn = NULL;
+
+    if (hash_empty(ht_krdma_node)) {
+        pr_err("the node hash table is null\n");
+        goto out;
+    }
+
+    if (nodename == NULL) {
+        hash_for_each(ht_krdma_node, bkt, conn, hn) {
+            /* break here to return the first node in the hash table */
+            goto success;
+        }
+    }
+
+    key = hashlen_hash(hashlen_string(ht_krdma_node, nodename));
+    hash_for_each_possible(ht_krdma_node, conn, hn, key) {
+        if (strcmp(conn->nodename, nodename) == 0) {
+            success = true;
+            break;
+        }
+    }
+
+    if (!success) {
+        pr_err("the node %s does not exists in the table\n", nodename);
+        goto out;
+    }
+
+success:
+    return conn;
+out:
+    return NULL;
+}
+EXPORT_SYMBOL(krdma_get_node);

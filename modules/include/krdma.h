@@ -191,6 +191,7 @@ void krdma_poll_work(struct work_struct *ws);
  */
 void krdma_test(void);
 int krdma_get_all_nodes(struct krdma_conn *nodes[], int n);
+struct krdma_conn *krdma_get_node(char *nodename);
 struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size);
 int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr);
 
