@@ -187,6 +187,12 @@ int handle_msg(struct krdma_conn *conn, struct ib_wc *wc);
 void krdma_poll_work(struct work_struct *ws);
 
 /*
+ * Performance benchmark
+ */
+int krdma_test_rpc_performance(void);
+
+
+/*
  * Exported APIs
  */
 void krdma_test(void);
