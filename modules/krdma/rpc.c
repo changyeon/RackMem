@@ -15,8 +15,6 @@ extern int g_debug;
 
 extern char g_nodename[__NEW_UTS_LEN + 1];
 
-static DEFINE_SPINLOCK(comp_lock);
-
 struct krdma_msg *krdma_alloc_msg(struct krdma_conn *conn, u64 size)
 {
     struct krdma_msg *kmsg = NULL;
@@ -741,8 +739,6 @@ void krdma_poll_work(struct work_struct *ws)
     struct ib_cq *cq;
     struct ib_wc wc;
 
-    spin_lock(&comp_lock);
-
     poll_work = container_of(ws, struct krdma_poll_work, work);
     conn = poll_work->conn;
     cq = conn->rpc_qp.cq;
@@ -776,6 +772,4 @@ void krdma_poll_work(struct work_struct *ws)
             continue;
         }
     }
-
-    spin_unlock(&comp_lock);
 }

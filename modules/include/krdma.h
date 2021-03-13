@@ -117,7 +117,7 @@ int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t addr, u64
  * RPC related
  */
 #define KRDMA_MSG_BUF_SIZE          4096
-#define KRDMA_RECV_WR_POOL_SIZE     16
+#define KRDMA_RECV_WR_POOL_SIZE     256
 #define KRDMA_SEND_WR_POOL_SIZE     16
 
 enum krdma_cmd {
