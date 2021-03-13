@@ -189,7 +189,7 @@ void krdma_poll_work(struct work_struct *ws);
 /*
  * Performance benchmark
  */
-int krdma_test_rpc_performance(void);
+int krdma_test_rpc_performance(struct krdma_conn *conn, int nr_threads);
 
 
 /*

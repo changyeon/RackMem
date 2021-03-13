@@ -49,7 +49,7 @@ static long krdma_ioctl_rpc_stress_test(unsigned long arg)
         goto out;
     }
 
-    ret = krdma_test_rpc_performance();
+    ret = krdma_test_rpc_performance(conn, 10);
     if (ret) {
         pr_err("error on krdma_test_rpc_performance\n");
         goto out;
