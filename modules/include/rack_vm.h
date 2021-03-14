@@ -46,7 +46,7 @@ struct rack_vm_region {
     struct rack_vm_page_list active_list;
     struct rack_vm_page_list inactive_list;
 
-    struct dvs_region *dvsr;
+    struct rack_dvs_region *dvsr;
     struct vm_area_struct *vma;
     spinlock_t lock;
 };

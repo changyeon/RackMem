@@ -1,5 +1,8 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/slab.h>
+#include <linux/vmalloc.h>
+#include <linux/mm.h>
 #include <rack_vm.h>
 
 extern int g_debug;
@@ -92,15 +95,14 @@ out:
 int rack_vm_restore(struct rack_vm_region *region, struct rack_vm_page *rpage)
 {
     int ret;
-    dma_addr_t dst = page_to_phys(vmalloc_to_page(rpage->buf));
 
     DEBUG_LOG("rack_vm_restore region: %p, pg_index: %llu\n", region,
               rpage->index);
 
-    ret = dvs_read(region->dvsr, dst, rpage->index * region->page_size,
-                   region->page_size);
+    ret = rack_dvs_read(region->dvsr, rpage->index * region->page_size,
+                        region->page_size, rpage->buf);
     if (ret) {
-        pr_err("error on dvs_read: %d\n", ret);
+        pr_err("error on rack_dvs_read: %d\n", ret);
         goto out;
     }
 
@@ -114,15 +116,14 @@ int rack_vm_writeback(struct rack_vm_region *region,
                       struct rack_vm_page *rpage)
 {
     int ret;
-    dma_addr_t dst = page_to_phys(vmalloc_to_page(rpage->buf));
 
     DEBUG_LOG("rack_vm_writeback region: %p, pg_index: %llu\n", region,
               rpage->index);
 
-    ret = dvs_write(region->dvsr, dst, rpage->index * region->page_size,
-                    region->page_size);
+    ret = rack_dvs_write(region->dvsr, rpage->index * region->page_size,
+                         region->page_size, rpage->buf);
     if (ret) {
-        pr_err("error on dvs_write: %d\n", ret);
+        pr_err("error on rack_dvs_write: %d\n", ret);
         goto out;
     }
 
@@ -237,7 +238,7 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
 {
     u64 i, total_size_bytes;
     struct rack_vm_region *region = NULL;
-    struct dvs_region *dvsr;
+    struct rack_dvs_region *dvsr;
 
     DEBUG_LOG("rack_vm_alloc_region size_bytes: %llu, page_size: %llu "
               "slab_size_bytes: %llu\n", size_bytes, page_size,
@@ -261,7 +262,7 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
         goto out;
     }
 
-    dvsr = dvs_alloc_region(total_size_bytes / MB, slab_size_bytes / MB);
+    dvsr = rack_dvs_alloc_region(total_size_bytes / MB, slab_size_bytes / MB);
     if (dvsr == NULL) {
         pr_err("error on dvs_alloc_region\n");
         goto out;
@@ -270,7 +271,7 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
     region = kzalloc(sizeof(*region), GFP_KERNEL);
     if (region == NULL) {
         pr_err("failed to allocate memory for struct rack_vm_region\n");
-        goto out_dvs_free_region;
+        goto out_rack_dvs_free_region;
     }
 
     region->size = total_size_bytes;
@@ -299,8 +300,8 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
 
 out_kfree_region:
     kfree(region);
-out_dvs_free_region:
-    dvs_free_region(dvsr);
+out_rack_dvs_free_region:
+    rack_dvs_free_region(dvsr);
 out:
     return NULL;
 }
@@ -310,7 +311,7 @@ void rack_vm_free_region(struct rack_vm_region *region)
     DEBUG_LOG("rack_vm_free_region %p\n", region);
 
     if (region->dvsr)
-        dvs_free_region(region->dvsr);
+        rack_dvs_free_region(region->dvsr);
     vfree(region->pages);
     kfree(region);
 };

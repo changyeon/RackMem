@@ -1,10 +1,14 @@
-obj-m := rack_vm.o rack_block.o rack_dvs.o krdma.o
+obj-m := rack_vm.o rack_block.o rack_dvs_rdma.o rack_dvs_dram.o rack_dvs.o krdma.o
 
 ccflags-y := -I$(src)/include
 
 rack_vm-y := rack_vm/rack_vm.o rack_vm/fault.o rack_vm/region.o
 
 rack_block-y := rack_block/main.o rack_block/zoned.o
+
+rack_dvs_rdma-y := rack_dvs/rdma_backend.o
+
+rack_dvs_dram-y := rack_dvs/dram_backend.o
 
 rack_dvs-y := rack_dvs/rack_dvs.o
 

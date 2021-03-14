@@ -1,0 +1,220 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
+#include <linux/module.h>
+#include <krdma.h>
+#include <rack_dvs.h>
+
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("RDMA backend for RackMem Distributed Virtual Storage");
+MODULE_AUTHOR("Changyeon Jo <changyeon@csap.snu.ac.kr>");
+
+extern int g_debug;
+
+#define DEBUG_LOG if (g_debug) pr_info
+
+struct rdma_node {
+    struct list_head head;
+    struct krdma_conn *conn;
+};
+
+struct rdma_slab {
+    struct krdma_mr *kmr;
+};
+
+static LIST_HEAD(rdma_node_list);
+static DEFINE_SPINLOCK(rdma_node_list_lock);
+
+static int rdma_alloc(struct dvs_slab *slab, u64 size);
+static void rdma_free(struct dvs_slab *slab);
+static int rdma_read(struct dvs_slab *slab, u64 offset, u64 size, void *dst);
+static int rdma_write(struct dvs_slab *slab, u64 offset, u64 size, void *src);
+
+static struct rack_dvs_ops rdma_ops = {
+    .alloc  = rdma_alloc,
+    .free   = rdma_free,
+    .read   = rdma_read,
+    .write  = rdma_write
+};
+
+static struct rack_dvs_dev rdma_dev = {
+    .dvs_ops = &rdma_ops
+};
+
+static struct rdma_node *rdma_get_node(void)
+{
+    struct rdma_node *node = NULL;
+
+    spin_lock(&rdma_node_list_lock);
+    if (list_empty(&rdma_node_list)) {
+        pr_err("failed to get a rdma node from the list\n");
+        spin_unlock(&rdma_node_list_lock);
+        goto out;
+    }
+    node = list_first_entry(&rdma_node_list, struct rdma_node, head);
+    list_rotate_left(&rdma_node_list);
+    spin_unlock(&rdma_node_list_lock);
+
+    return node;
+
+out:
+    return NULL;
+}
+
+static int rdma_alloc(struct dvs_slab *slab, u64 size)
+{
+    int ret = 0;
+    struct rdma_node *node;
+    struct rdma_slab *rdma_slab;
+
+    node = rdma_get_node();
+    if (node == NULL) {
+        pr_err("no available rdma node\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    rdma_slab = kzalloc(sizeof(*slab), GFP_KERNEL);
+    if (rdma_slab == NULL) {
+       pr_err("failed to allocate memory for rdma_slab\n");
+       ret = -ENOMEM;
+       goto out;
+    }
+
+    rdma_slab->kmr = krdma_alloc_remote_memory(node->conn, size);
+    if (rdma_slab->kmr == NULL) {
+        pr_err("error on krdma_alloc_remote_memory\n");
+        goto out_kfree_slab;
+    }
+
+    slab->private = (void *) rdma_slab;
+
+    return 0;
+
+out_kfree_slab:
+    kfree(rdma_slab);
+out:
+    return ret;
+}
+
+static void rdma_free(struct dvs_slab *slab)
+{
+    struct rdma_slab *rdma_slab;
+
+    rdma_slab = (struct rdma_slab *) slab->private;
+    krdma_free_remote_memory(rdma_slab->kmr->conn, rdma_slab->kmr);
+    kfree(rdma_slab);
+}
+
+static int rdma_read(struct dvs_slab *slab, u64 offset, u64 size, void *dst)
+{
+    int ret = 0;
+    struct rdma_slab *rdma_slab;
+    struct krdma_conn *conn;
+    struct krdma_mr *kmr;
+    dma_addr_t addr;
+
+    rdma_slab = (struct rdma_slab *) slab->private;
+    conn = rdma_slab->kmr->conn;
+    kmr = rdma_slab->kmr;
+
+    addr = virt_to_phys(vmalloc_to_page(dst));
+    ret = krdma_io(conn, kmr, addr, offset, size, READ);
+    if (ret) {
+        pr_err("error on krdma_io\n");
+        goto out;
+    }
+
+    return 0;
+
+out:
+    return ret;
+}
+
+static int rdma_write(struct dvs_slab *slab, u64 offset, u64 size, void *src)
+{
+    int ret = 0;
+    struct rdma_slab *rdma_slab;
+    struct krdma_conn *conn;
+    struct krdma_mr *kmr;
+    dma_addr_t addr;
+
+    rdma_slab = (struct rdma_slab *) slab->private;
+    conn = rdma_slab->kmr->conn;
+    kmr = rdma_slab->kmr;
+
+    addr = virt_to_phys(vmalloc_to_page(src));
+    ret = krdma_io(conn, kmr, addr, offset, size, WRITE);
+    if (ret) {
+        pr_err("error on krdma_io\n");
+        goto out;
+    }
+
+    return 0;
+
+out:
+    return ret;
+}
+
+static int __init rack_dvs_rdma_init(void)
+{
+    int i, n, ret = 0;
+    struct krdma_conn *nodes[32];
+    struct rdma_node *node, *next;
+
+    n = krdma_get_all_nodes(nodes, 32);
+    pr_info("available nodes: %d\n", n);
+    for (i = 0; i < n; i++)
+        pr_info("node: %s (%p)\n", nodes[i]->nodename, nodes[i]);
+
+    spin_lock(&rdma_node_list_lock);
+
+    for (i = 0; i < n; i++) {
+        node = kzalloc(sizeof(*node), GFP_KERNEL);
+        if (node == NULL) {
+            pr_err("failed to allocate memory for rdma_node\n");
+            ret = -ENOMEM;
+            goto out;
+        }
+        INIT_LIST_HEAD(&node->head);
+        node->conn = nodes[i];
+        list_add_tail(&node->head, &rdma_node_list);
+    }
+
+    spin_unlock(&rdma_node_list_lock);
+
+    pr_info("rack_dvs_rdma: module loaded\n");
+
+    return 0;
+
+ out:
+    list_for_each_entry_safe(node, next, &rdma_node_list, head) {
+        list_del_init(&node->head);
+        kfree(node);
+    }
+
+    spin_unlock(&rdma_node_list_lock);
+
+    rack_dvs_register_dev(&rdma_dev);
+
+    return ret;
+}
+
+static void __exit rack_dvs_rdma_exit(void)
+{
+    struct rdma_node *node, *next;
+
+    spin_lock(&rdma_node_list_lock);
+    list_for_each_entry_safe(node, next, &rdma_node_list, head) {
+        list_del_init(&node->head);
+        kfree(node);
+    }
+
+    spin_unlock(&rdma_node_list_lock);
+
+    rack_dvs_unregister_dev(&rdma_dev);
+
+    pr_info("rack_dvs_rdma: module unloaded\n");
+}
+
+module_init(rack_dvs_rdma_init);
+module_exit(rack_dvs_rdma_exit);
