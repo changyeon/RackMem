@@ -28,6 +28,9 @@ int rack_dvs_io(struct rack_dvs_region *region, u64 offset, u64 size,
     u64 slab_size_bytes, slab_index, slab_offset;
     struct dvs_slab *slab;
 
+    DEBUG_LOG("rack_dvs_io region: %p, offset: %llu, size: %llu, buf: %p, "
+              "dir: %d\n", region, offset, size, buf, dir);
+
     slab_size_bytes = region->slab_size_mb * MB;
     slab_index = offset / slab_size_bytes;
     slab_offset = offset % slab_size_bytes;
@@ -45,6 +48,7 @@ int rack_dvs_io(struct rack_dvs_region *region, u64 offset, u64 size,
         ret = slab->dev->dvs_ops->alloc(slab, slab_size_bytes);
         if (ret) {
             pr_err("error on dvs_ops->alloc: %d\n", ret);
+            spin_unlock(&slab->lock);
             goto out;
         }
     }
@@ -87,6 +91,9 @@ struct rack_dvs_region *rack_dvs_alloc_region(u64 size_mb, u64 slab_size_mb)
 
     nr_slabs = size_mb / slab_size_mb;
 
+    DEBUG_LOG("rack_dvs_alloc_region size_mb: %llu, slab_size_mb: %llu, "
+              "nr_slabs: %llu\n", size_mb, slab_size_mb, nr_slabs);
+
     region = kzalloc(sizeof(*region), GFP_KERNEL);
     if (region == NULL) {
         pr_err("failed to allocate memory for struct rack_dvs_region\n");
@@ -126,12 +133,14 @@ void rack_dvs_free_region(struct rack_dvs_region *region)
     u64 i;
     struct dvs_slab *slab;
 
+    DEBUG_LOG("rack_dvs_free_region region: %p\n", region);
+
     for (i = 0; i < region->nr_slabs; i++) {
         slab = &region->slabs[i];
         spin_lock(&slab->lock);
         if (slab->private)
             slab->dev->dvs_ops->free(slab);
-        spin_lock(&slab->lock);
+        spin_unlock(&slab->lock);
     }
 
     kfree(region->slabs);
@@ -144,6 +153,8 @@ EXPORT_SYMBOL(rack_dvs_free_region);
  */
 int rack_dvs_register_dev(struct rack_dvs_dev *dev)
 {
+    DEBUG_LOG("rack_dvs_register_dev: %p\n", dev);
+
     spin_lock(&dvs_dev_list_lock);
     list_add_tail(&dev->head, &dvs_dev_list);
     spin_unlock(&dvs_dev_list_lock);
@@ -158,6 +169,8 @@ EXPORT_SYMBOL(rack_dvs_register_dev);
 void rack_dvs_unregister_dev(struct rack_dvs_dev *dev)
 {
     struct rack_dvs_dev *node, *next;
+
+    DEBUG_LOG("rack_dvs_unregister_dev: %p\n", dev);
 
     spin_lock(&dvs_dev_list_lock);
     list_for_each_entry_safe(node, next, &dvs_dev_list, head) {

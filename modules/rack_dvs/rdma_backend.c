@@ -8,7 +8,9 @@ MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("RDMA backend for RackMem Distributed Virtual Storage");
 MODULE_AUTHOR("Changyeon Jo <changyeon@csap.snu.ac.kr>");
 
-extern int g_debug;
+int g_debug = 0;
+module_param_named(debug, g_debug, int, 0);
+MODULE_PARM_DESC(debug, "enable debug mode");
 
 #define DEBUG_LOG if (g_debug) pr_info
 
@@ -117,7 +119,11 @@ static int rdma_read(struct dvs_slab *slab, u64 offset, u64 size, void *dst)
     conn = rdma_slab->kmr->conn;
     kmr = rdma_slab->kmr;
 
-    addr = virt_to_phys(vmalloc_to_page(dst));
+    if (dst >= high_memory)
+        addr = page_to_phys(vmalloc_to_page(dst));
+    else
+        addr = virt_to_phys(dst);
+
     ret = krdma_io(conn, kmr, addr, offset, size, READ);
     if (ret) {
         pr_err("error on krdma_io\n");
@@ -142,7 +148,11 @@ static int rdma_write(struct dvs_slab *slab, u64 offset, u64 size, void *src)
     conn = rdma_slab->kmr->conn;
     kmr = rdma_slab->kmr;
 
-    addr = virt_to_phys(vmalloc_to_page(src));
+    if (src >= high_memory)
+        addr = page_to_phys(vmalloc_to_page(src));
+    else
+        addr = virt_to_phys(src);
+
     ret = krdma_io(conn, kmr, addr, offset, size, WRITE);
     if (ret) {
         pr_err("error on krdma_io\n");
@@ -162,6 +172,11 @@ static int __init rack_dvs_rdma_init(void)
     struct rdma_node *node, *next;
 
     n = krdma_get_all_nodes(nodes, 32);
+    if (n == 0) {
+        pr_err("no available nodes for rdma backend\n");
+        goto out;
+    }
+
     pr_info("available nodes: %d\n", n);
     for (i = 0; i < n; i++)
         pr_info("node: %s (%p)\n", nodes[i]->nodename, nodes[i]);
@@ -173,7 +188,7 @@ static int __init rack_dvs_rdma_init(void)
         if (node == NULL) {
             pr_err("failed to allocate memory for rdma_node\n");
             ret = -ENOMEM;
-            goto out;
+            goto out_free_nodes;
         }
         INIT_LIST_HEAD(&node->head);
         node->conn = nodes[i];
@@ -182,11 +197,23 @@ static int __init rack_dvs_rdma_init(void)
 
     spin_unlock(&rdma_node_list_lock);
 
+    ret = rack_dvs_register_dev(&rdma_dev);
+    if (ret) {
+        pr_err("failed to register rdma backend for RackDVS\n");
+        goto out_free_nodes;
+    }
+
+    ret = dvs_test_single_thread_correctness();
+    if (ret)
+        pr_info("dvs_test_single_thread_correctness: FAIL\n");
+    else
+        pr_info("dvs_test_single_thread_correctness: SUCCESS\n");
+
     pr_info("rack_dvs_rdma: module loaded\n");
 
     return 0;
 
- out:
+ out_free_nodes:
     list_for_each_entry_safe(node, next, &rdma_node_list, head) {
         list_del_init(&node->head);
         kfree(node);
@@ -194,8 +221,7 @@ static int __init rack_dvs_rdma_init(void)
 
     spin_unlock(&rdma_node_list_lock);
 
-    rack_dvs_register_dev(&rdma_dev);
-
+out:
     return ret;
 }
 

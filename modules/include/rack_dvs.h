@@ -38,6 +38,14 @@ struct rack_dvs_region {
 #define rack_dvs_write(region, offset, size, dst) \
     rack_dvs_io(region, offset, size, dst, WRITE)
 
+/*
+ * Test functions
+ */
+int dvs_test_single_thread_correctness(void);
+
+/*
+ * Exported APIs
+ */
 int rack_dvs_io(struct rack_dvs_region *region, u64 offset, u64 size,
                 void *buf, int dir);
 struct rack_dvs_region *rack_dvs_alloc_region(u64 size_mb, u64 slab_size_mb);

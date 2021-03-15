@@ -9,7 +9,9 @@ MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DRAM backend for RackMem Distributed Virtual Storage");
 MODULE_AUTHOR("Changyeon Jo <changyeon@csap.snu.ac.kr>");
 
-extern int g_debug;
+int g_debug = 0;
+module_param_named(debug, g_debug, int, 0);
+MODULE_PARM_DESC(debug, "enable debug mode");
 
 #define DEBUG_LOG if (g_debug) pr_info
 
@@ -37,6 +39,8 @@ static int dram_alloc(struct dvs_slab *slab, u64 size)
 {
     int ret = 0;
     struct dram_slab *dram_slab;
+
+    DEBUG_LOG("dram_alloc slab: %p, size: %llu\n", slab, size);
 
     dram_slab = kzalloc(sizeof(*slab), GFP_KERNEL);
     if (dram_slab == NULL) {
@@ -66,44 +70,66 @@ static void dram_free(struct dvs_slab *slab)
 {
     struct dram_slab *dram_slab;
 
+    DEBUG_LOG("dram_free slab: %p\n", slab);
+
     dram_slab = (struct dram_slab *) slab->private;
     vfree(dram_slab->buf);
     kfree(dram_slab);
 }
 
 /**
- * dram_read - copy data from the slab to the dst.
+ * dram_read - read data from the slab
  */
 static int dram_read(struct dvs_slab *slab, u64 offset, u64 size, void *dst)
 {
     struct dram_slab *dram_slab;
 
+    DEBUG_LOG("dram_read slab: %p, offset: %llu, size: %llu, dst: %p\n",
+              slab, offset, size, dst);
+
     dram_slab = (struct dram_slab *) slab->private;
-    memcpy(dst, dram_slab->buf, size);
+    memcpy(dst, dram_slab->buf + offset, size);
 
     return 0;
 }
 
 /**
- * dram_read - copy data from the src to the slab.
+ * dram_write - write data to the slab
  */
 static int dram_write(struct dvs_slab *slab, u64 offset, u64 size, void *src)
 {
     struct dram_slab *dram_slab;
 
+    DEBUG_LOG("dram_write slab: %p, offset: %llu, size: %llu, src: %p\n",
+              slab, offset, size, src);
+
     dram_slab = (struct dram_slab *) slab->private;
-    memcpy(dram_slab->buf, src, size);
+    memcpy(dram_slab->buf + offset, src, size);
 
     return 0;
 }
 
 static int __init rack_dvs_dram_init(void)
 {
-    rack_dvs_register_dev(&dram_dev);
+    int ret = 0;
+    ret = rack_dvs_register_dev(&dram_dev);
+    if (ret) {
+        pr_err("failed to register dram backend for RackDVS\n");
+        goto out;
+    }
+
+    ret = dvs_test_single_thread_correctness();
+    if (ret)
+        pr_info("dvs_test_single_thread_correctness: FAIL\n");
+    else
+        pr_info("dvs_test_single_thread_correctness: SUCCESS\n");
 
     pr_info("rack_dvs_dram: module loaded\n");
 
     return 0;
+
+out:
+    return ret;
 }
 
 static void __exit rack_dvs_dram_exit(void)
