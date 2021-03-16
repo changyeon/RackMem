@@ -7,6 +7,7 @@
 #define GB                  (1UL << 30UL)
 
 #include <linux/list.h>
+#include <linux/spinlock.h>
 
 struct rack_dvs_dev {
     struct list_head head;

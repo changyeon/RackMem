@@ -883,7 +883,7 @@ static int krdma_cm_route_resolved(struct krdma_conn *conn)
     param.retry_count = KRDMA_CM_RETRY_COUNT;
     param.rnr_retry_count = KRDMA_CM_RNR_RETRY_COUNT;
 
-    ret = rdma_connect_locked(conn->cm_id, &param);
+    ret = rdma_connect(conn->cm_id, &param);
     if (ret) {
         pr_err("error on rdma_connect: %d\n", ret);
         goto out_free_recv_msg;

@@ -77,7 +77,7 @@ int rack_vm_remap(struct rack_vm_region *region, struct rack_vm_page *rpage,
               rpage->index);
 
     ret = remap_vmalloc_range_partial(
-            region->vma, fault_address, rpage->buf, 0LL, page_size);
+            region->vma, fault_address, rpage->buf, page_size);
     if (ret) {
         pr_err("error on remap_vmalloc_range_partial: %d\n", ret);
         goto out;
@@ -279,7 +279,7 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
     region->max_pages = total_size_bytes / page_size;
 
     /* FIXME */
-    atomic64_set(&region->page_count_limit, 131072);
+    atomic64_set(&region->page_count_limit, 65536);
     atomic64_set(&region->page_count, 0);
 
     region->pages = vzalloc(region->max_pages * sizeof(struct rack_vm_page));
