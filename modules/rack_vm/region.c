@@ -6,6 +6,7 @@
 #include <rack_vm.h>
 
 extern int g_debug;
+extern int g_local_pages;
 
 #define DEBUG_LOG if (g_debug) pr_info
 
@@ -278,8 +279,7 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
     region->page_size = page_size;
     region->max_pages = total_size_bytes / page_size;
 
-    /* FIXME */
-    atomic64_set(&region->page_count_limit, 65536);
+    atomic64_set(&region->page_count_limit, g_local_pages);
     atomic64_set(&region->page_count, 0);
 
     region->pages = vzalloc(region->max_pages * sizeof(struct rack_vm_page));
