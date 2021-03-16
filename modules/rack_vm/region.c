@@ -87,6 +87,8 @@ int rack_vm_remap(struct rack_vm_region *region, struct rack_vm_page *rpage,
     rpage->flags = RACK_VM_PAGE_ACTIVE;
     rack_vm_page_list_add(&region->active_list, rpage);
 
+    count_event(region, RACK_VM_EVENT_REMAP);
+
     return 0;
 
 out:
@@ -106,6 +108,7 @@ int rack_vm_restore(struct rack_vm_region *region, struct rack_vm_page *rpage)
         pr_err("error on rack_dvs_read: %d\n", ret);
         goto out;
     }
+    count_event(region, RACK_VM_EVENT_IO_READ);
 
     return 0;
 
@@ -127,6 +130,7 @@ int rack_vm_writeback(struct rack_vm_region *region,
         pr_err("error on rack_dvs_write: %d\n", ret);
         goto out;
     }
+    count_event(region, RACK_VM_EVENT_IO_WRITE);
 
     return 0;
 
@@ -143,6 +147,8 @@ void rack_vm_unmap(struct rack_vm_region *region, struct rack_vm_page *rpage)
                    region->vma->vm_start + rpage->index * region->page_size,
                    region->page_size);
     rpage->flags = RACK_VM_PAGE_INACTIVE;
+
+    count_event(region, RACK_VM_EVENT_UNMAP);
 }
 
 void *rack_vm_reclaim_active(struct rack_vm_region *region)
@@ -174,6 +180,8 @@ void *rack_vm_reclaim_active(struct rack_vm_region *region)
     rpage->flags = RACK_VM_PAGE_NOT_PRESENT;
     spin_unlock(&rpage->lock);
 
+    count_event(region, RACK_VM_EVENT_RECLAIM_ACTIVE);
+
     return buf;
 
 out:
@@ -191,6 +199,7 @@ void *rack_vm_reclaim_inactive(struct rack_vm_region *region)
     if (rpage) {
         spin_lock(&rpage->lock);
         if (likely(rpage->flags & RACK_VM_PAGE_INACTIVE)) {
+            count_event(region, RACK_VM_EVENT_RECLAIM_INACTIVE);
             ret = rack_vm_writeback(region, rpage);
             if (ret) {
                 pr_err("error on rack_vm_writeback: %p\n", rpage);
@@ -203,6 +212,7 @@ void *rack_vm_reclaim_inactive(struct rack_vm_region *region)
         } else {
             /* this page may be in ACTIVE state if this page is touched
              * by another thread before we get the lock */
+            count_event(region, RACK_VM_EVENT_RECLAIM_INACTIVE_MISS);
         }
         spin_unlock(&rpage->lock);
     }
@@ -227,6 +237,7 @@ void *rack_vm_alloc_buf(struct rack_vm_region *region)
         pr_err("error on vmalloc_user\n");
         goto out;
     }
+    count_event(region, RACK_VM_EVENT_PAGE_ALLOC);
 
     return buf;
 
@@ -294,6 +305,7 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
     rack_vm_page_list_init(&region->active_list);
     rack_vm_page_list_init(&region->inactive_list);
     region->dvsr = dvsr;
+    region->stat = alloc_percpu(struct rack_vm_event_count);
     spin_lock_init(&region->lock);
 
     return region;
@@ -306,10 +318,28 @@ out:
     return NULL;
 }
 
+static void rack_vm_print_statistics(struct rack_vm_region *region)
+{
+    int i, cpu;
+    u64 sum[__NR_RACK_VM_EVENTS];
+
+    memset(sum, 0, sizeof(sum));
+    for_each_online_cpu(cpu)
+        for (i = 0; i < __NR_RACK_VM_EVENTS; i++)
+            sum[i] += per_cpu(region->stat->count[i], cpu);
+
+    for (i = 0; i < __NR_RACK_VM_EVENTS; i++)
+        pr_info("statistics (%p) %s: %llu\n", region, rack_vm_events[i],
+                sum[i]);
+}
+
 void rack_vm_free_region(struct rack_vm_region *region)
 {
     DEBUG_LOG("rack_vm_free_region %p\n", region);
 
+    rack_vm_print_statistics(region);
+
+    free_percpu(region->stat);
     if (region->dvsr)
         rack_dvs_free_region(region->dvsr);
     vfree(region->pages);

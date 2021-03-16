@@ -16,7 +16,7 @@ int g_debug = 0;
 module_param_named(debug, g_debug, int, 0);
 MODULE_PARM_DESC(debug, "enable debug mode");
 
-int g_local_pages = 0;
+int g_local_pages = 65536;
 module_param_named(local_pages, g_local_pages, int, 0);
 MODULE_PARM_DESC(local_pages, "the number of local pages for caching");
 

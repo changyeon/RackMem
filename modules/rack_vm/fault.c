@@ -3,6 +3,7 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/mm_types.h>
+#include <linux/percpu-defs.h>
 
 #include <rack_dvs.h>
 #include <rack_vm.h>
@@ -75,6 +76,12 @@ vm_fault_t rack_vm_fault(struct vm_fault *vmf)
         goto out;
     }
 
+    count_event(region, RACK_VM_EVENT_PGFAULT);
+    if (vmf->flags & FAULT_FLAG_WRITE)
+        count_event(region, RACK_VM_EVENT_PGFAULT_WRITE);
+    else
+        count_event(region, RACK_VM_EVENT_PGFAULT_READ);
+
     vma = vmf->vma;
     fault_address = (vmf->address / region->page_size) * region->page_size;
     page_index = (fault_address - vma->vm_start) / region->page_size;
@@ -87,11 +94,14 @@ vm_fault_t rack_vm_fault(struct vm_fault *vmf)
     spin_lock(&rpage->lock);
 
     /* Step 2: Return here if the page has been resolved by another handler */
-    if (unlikely(rpage->flags & RACK_VM_PAGE_ACTIVE))
+    if (unlikely(rpage->flags & RACK_VM_PAGE_ACTIVE)) {
+        count_event(region, RACK_VM_EVENT_PGFAULT_COLLISION);
         goto success;
+    }
 
     /* Step 3: Pagefault on an inactive page, just restore the mapping */
     if (unlikely(rpage->flags & RACK_VM_PAGE_INACTIVE)) {
+        count_event(region, RACK_VM_EVENT_PGFAULT_INACTIVE);
         rack_vm_page_list_del(&region->inactive_list, rpage);
         goto success_remap;
     }

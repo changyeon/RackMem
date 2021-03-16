@@ -6,16 +6,57 @@
 #include <linux/spinlock.h>
 #include <linux/mm_types.h>
 #include <linux/atomic.h>
+#include <linux/percpu-defs.h>
 #include <rack_dvs.h>
 
+#define count_event(region, event) \
+    this_cpu_inc(region->stat->count[event])
+
+enum rack_vm_event {
+    RACK_VM_EVENT_PGFAULT,
+    RACK_VM_EVENT_PGFAULT_READ,
+    RACK_VM_EVENT_PGFAULT_WRITE,
+    RACK_VM_EVENT_PGFAULT_COLLISION,
+    RACK_VM_EVENT_PGFAULT_INACTIVE,
+    RACK_VM_EVENT_IO_READ,
+    RACK_VM_EVENT_IO_WRITE,
+    RACK_VM_EVENT_PAGE_ALLOC,
+    RACK_VM_EVENT_RECLAIM_INACTIVE,
+    RACK_VM_EVENT_RECLAIM_INACTIVE_MISS,
+    RACK_VM_EVENT_RECLAIM_ACTIVE,
+    RACK_VM_EVENT_REMAP,
+    RACK_VM_EVENT_UNMAP,
+    __NR_RACK_VM_EVENTS
+};
+
+struct rack_vm_event_count {
+    u64 count[__NR_RACK_VM_EVENTS];
+};
+
+static const char * const rack_vm_events[] = {
+    [RACK_VM_EVENT_PGFAULT]                 = "pgfault",
+    [RACK_VM_EVENT_PGFAULT_READ]            = "pgfault_read",
+    [RACK_VM_EVENT_PGFAULT_WRITE]           = "pgfualt_write",
+    [RACK_VM_EVENT_PGFAULT_COLLISION]       = "pgfault_collision",
+    [RACK_VM_EVENT_PGFAULT_INACTIVE]        = "pgfault_inactive",
+    [RACK_VM_EVENT_IO_READ]                 = "io_read",
+    [RACK_VM_EVENT_IO_WRITE]                = "io_write",
+    [RACK_VM_EVENT_PAGE_ALLOC]              = "page_alloc",
+    [RACK_VM_EVENT_RECLAIM_INACTIVE]        = "reclaim_inactive",
+    [RACK_VM_EVENT_RECLAIM_INACTIVE_MISS]   = "reclaim_inactive_miss",
+    [RACK_VM_EVENT_RECLAIM_ACTIVE]          = "reclaim_active",
+    [RACK_VM_EVENT_REMAP]                   = "remap",
+    [RACK_VM_EVENT_UNMAP]                   = "unmap",
+};
+
 enum rack_vm_page_state {
-    RACK_VM_PAGE_IDLE           = 0x000001,
-    RACK_VM_PAGE_ACTIVE         = 0x000002,
-    RACK_VM_PAGE_INACTIVE       = 0x000004,
-    RACK_VM_PAGE_NOT_PRESENT    = 0x000008,
-    RACK_VM_PAGE_PREFETCH       = 0x000010,
-    RACK_VM_PAGE_EARLY_FREE     = 0x000020,
-    RACK_VM_PAGE_ERROR          = 0x000040
+    RACK_VM_PAGE_IDLE                       = 0x000001,
+    RACK_VM_PAGE_ACTIVE                     = 0x000002,
+    RACK_VM_PAGE_INACTIVE                   = 0x000004,
+    RACK_VM_PAGE_NOT_PRESENT                = 0x000008,
+    RACK_VM_PAGE_PREFETCH                   = 0x000010,
+    RACK_VM_PAGE_EARLY_FREE                 = 0x000020,
+    RACK_VM_PAGE_ERROR                      = 0x000040
 };
 
 struct rack_vm_page_list {
@@ -48,6 +89,7 @@ struct rack_vm_region {
 
     struct rack_dvs_region *dvsr;
     struct vm_area_struct *vma;
+    struct rack_vm_event_count __percpu *stat;
     spinlock_t lock;
 };
 
