@@ -9,6 +9,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_compile_options(-Wall -Wextra -pedantic -Werror)
 
+add_subdirectory(librackdm)
 add_subdirectory(libkrdma)
 add_subdirectory(krdma_cm)
-add_subdirectory(examples)
+add_subdirectory(examples_c)
+add_subdirectory(examples_cpp)
