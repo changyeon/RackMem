@@ -237,7 +237,7 @@ void *rack_vm_alloc_buf(struct rack_vm_region *region)
         pr_err("error on vmalloc_user\n");
         goto out;
     }
-    count_event(region, RACK_VM_EVENT_PAGE_ALLOC);
+    count_event(region, RACK_VM_EVENT_LOCAL_PAGE_ALLOC);
 
     return buf;
 
@@ -300,6 +300,7 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
     }
     for (i = 0; i < region->max_pages; i++) {
         region->pages[i].index = i;
+        region->pages[i].flags = RACK_VM_PAGE_IDLE;
         spin_lock_init(&region->pages[i].lock);
     }
     rack_vm_page_list_init(&region->active_list);
@@ -335,13 +336,22 @@ static void rack_vm_print_statistics(struct rack_vm_region *region)
 
 void rack_vm_free_region(struct rack_vm_region *region)
 {
+    u64 i;
+    struct rack_vm_page *rpage;
+
     DEBUG_LOG("rack_vm_free_region %p\n", region);
 
-    rack_vm_print_statistics(region);
+    for (i = 0; i < region->max_pages; i++) {
+        rpage = &region->pages[i];
+        if (rpage->buf) {
+            vfree(rpage->buf);
+            count_event(region, RACK_VM_EVENT_LOCAL_PAGE_FREE);
+        }
+    }
 
+    rack_vm_print_statistics(region);
     free_percpu(region->stat);
-    if (region->dvsr)
-        rack_dvs_free_region(region->dvsr);
+    rack_dvs_free_region(region->dvsr);
     vfree(region->pages);
     kfree(region);
 };

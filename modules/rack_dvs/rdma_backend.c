@@ -85,6 +85,7 @@ static int rdma_alloc(struct dvs_slab *slab, u64 size)
     rdma_slab->kmr = krdma_alloc_remote_memory(node->conn, size);
     if (rdma_slab->kmr == NULL) {
         pr_err("error on krdma_alloc_remote_memory\n");
+        ret = -ENOMEM;
         goto out_kfree_slab;
     }
 
@@ -174,6 +175,7 @@ static int __init rack_dvs_rdma_init(void)
     n = krdma_get_all_nodes(nodes, 32);
     if (n == 0) {
         pr_err("no available nodes for rdma backend\n");
+        ret = -EINVAL;
         goto out;
     }
 
