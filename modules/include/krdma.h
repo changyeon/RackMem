@@ -195,7 +195,7 @@ int krdma_test_rpc_performance(struct krdma_conn *conn, int nr_threads);
 /*
  * Exported APIs
  */
-void krdma_test(void);
+void krdma_node_name(char *dst);
 int krdma_get_all_nodes(struct krdma_conn *nodes[], int n);
 struct krdma_conn *krdma_get_node(char *nodename);
 struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size);

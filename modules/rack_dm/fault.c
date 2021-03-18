@@ -21,6 +21,7 @@ static struct vm_operations_struct rack_dm_ops = {
 
 int rack_dm_mmap(struct file *fp, struct vm_area_struct *vma)
 {
+    int ret;
     u64 size_bytes, page_size;
     struct rack_dm_region *region;
 
@@ -36,13 +37,16 @@ int rack_dm_mmap(struct file *fp, struct vm_area_struct *vma)
         goto out;
     }
 
-    region->vma = vma;
-    vma->vm_private_data = (void *) region;
-    vma->vm_ops = &rack_dm_ops;
-    vma->vm_flags |= VM_MIXEDMAP;
+    ret = rack_dm_map_region(region, vma, &rack_dm_ops);
+    if (ret) {
+        pr_err("error on rack_dm_map_region\n");
+        goto out_free_region;
+    }
 
     return 0;
 
+out_free_region:
+    rack_dm_free_region(region);
 out:
     return -EINVAL;
 }

@@ -25,4 +25,3 @@ struct krdma_ioctl_msg {
 long krdma_ioctl(struct file *fp, unsigned int cmd, unsigned long arg);
 
 #endif /* _KRDMA_IOCTL_H_ */
-

@@ -3,6 +3,7 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
+#include <linux/random.h>
 #include <rack_dm.h>
 
 extern int g_debug;
@@ -18,7 +19,7 @@ static void rack_dm_page_list_init(struct rack_dm_page_list *page_list)
 }
 
 void rack_dm_page_list_add(struct rack_dm_page_list *page_list,
-                                  struct rack_dm_page *rpage)
+                           struct rack_dm_page *rpage)
 {
     spin_lock(&page_list->lock);
     list_add_tail(&rpage->head, &page_list->head);
@@ -28,7 +29,7 @@ void rack_dm_page_list_add(struct rack_dm_page_list *page_list,
 }
 
 void rack_dm_page_list_del(struct rack_dm_page_list *page_list,
-                                  struct rack_dm_page *rpage)
+                           struct rack_dm_page *rpage)
 {
     spin_lock(&page_list->lock);
     list_del_init(&rpage->head);
@@ -260,6 +261,67 @@ out:
     return NULL;
 }
 
+static int write_region_id(struct rack_dm_region *region)
+{
+    int ret;
+    struct rack_dm_page *rpage = NULL;
+    void *buf = NULL;
+
+    rpage = &region->pages[0];
+
+    rpage->buf = rack_dm_alloc_buf(region);
+    if (rpage->buf == NULL) {
+        pr_err("error on rack_dm_alloc_buf\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    *((u64 *) rpage->buf) = region->id;
+    krdma_node_name((char *) ((u64) rpage->buf + sizeof(u64)));
+
+    DEBUG_LOG("write_region_id id: %llu, node_name: %s\n",
+              *((u64 *) rpage->buf),
+              (char *) ((u64) rpage->buf + sizeof(u64)));
+
+    ret = rack_dm_remap(region, rpage, region->vma->vm_start,
+                        region->page_size);
+    if (ret) {
+        pr_err("failed to remap the page\n");
+        goto out_free_buf;
+    }
+
+    return 0;
+
+out_free_buf:
+    atomic64_dec(&region->page_count);
+    vfree(buf);
+out:
+    return ret;
+}
+
+int rack_dm_map_region(struct rack_dm_region *region,
+                       struct vm_area_struct *vma,
+                       struct vm_operations_struct *vm_ops)
+{
+    int ret;
+
+    region->vma = vma;
+    vma->vm_private_data = (void *) region;
+    vma->vm_ops = vm_ops;
+    vma->vm_flags |= VM_MIXEDMAP;
+
+    ret = write_region_id(region);
+    if (ret) {
+        pr_err("error on write_region_id\n");
+        goto out;
+    }
+
+    return 0;
+
+out:
+    return ret;
+}
+
 struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
 {
     u64 i, total_size_bytes;
@@ -281,6 +343,7 @@ struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
         goto out;
     }
 
+    region->id = (u64) region;
     region->size = total_size_bytes;
     region->page_size = page_size;
     region->max_pages = total_size_bytes / page_size;
@@ -301,10 +364,16 @@ struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
     rack_dm_page_list_init(&region->active_list);
     rack_dm_page_list_init(&region->inactive_list);
     region->stat = alloc_percpu(struct rack_dm_event_count);
+    if (region->stat == NULL) {
+        pr_err("error on alloc_percpu (region->stat)\n");
+        goto out_vfree_pages;
+    }
     spin_lock_init(&region->lock);
 
     return region;
 
+out_vfree_pages:
+    vfree(region->pages);
 out_kfree_region:
     kfree(region);
 out:

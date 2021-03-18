@@ -42,6 +42,12 @@ static struct file_operations fops = {
     .unlocked_ioctl = krdma_ioctl
 };
 
+void krdma_node_name(char *dst)
+{
+    strcpy(dst, g_nodename);
+}
+EXPORT_SYMBOL(krdma_node_name);
+
 static int __init krdma_init(void)
 {
     int ret = 0;

@@ -3,6 +3,7 @@
 #include <linux/module.h>
 #include <krdma.h>
 #include <rack_dm.h>
+#include "ioctl.h"
 
 #define DEVICE_NAME "rack_vm"
 #define CLASS_NAME "rack_vm"
@@ -27,7 +28,8 @@ static struct rack_dm_device_data {
 
 
 static struct file_operations rack_fops = {
-    .mmap = rack_dm_mmap
+    .mmap = rack_dm_mmap,
+    .unlocked_ioctl = rack_dm_ioctl
 };
 
 static int __init rack_dm_init(void)

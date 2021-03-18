@@ -82,7 +82,7 @@ struct mmap_msg {
 };
 
 struct rack_dm_region *rack_dm_mmap(const char *node, uint64_t region_id,
-                                   uint64_t size)
+                                    uint64_t size)
 {
     int ret;
     struct mmap_msg msg;

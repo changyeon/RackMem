@@ -4,7 +4,7 @@ static int start_server(int port)
 {
     int ret, fd, new_fd, len;
     int opt = 1, backlog = 128;
-    uint64_t i, n, cnt, region_size = 1048576UL, page_size = 4096UL;
+    uint64_t i, n, cnt, region_size = 32768UL, page_size = 4096UL;
     uint64_t *ptr;
     struct sockaddr_in addr;
     struct migrate_msg msg;

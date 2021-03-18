@@ -81,6 +81,7 @@ struct rack_dm_page {
 };
 
 struct rack_dm_region {
+    u64 id;
     u64 size;
     u64 page_size;
     u64 max_pages;
@@ -110,6 +111,7 @@ void rack_dm_unmap(struct rack_dm_region *region, struct rack_dm_page *rpage);
 void *rack_dm_reclaim_active(struct rack_dm_region *region);
 void *rack_dm_reclaim_inactive(struct rack_dm_region *region);
 void *rack_dm_alloc_buf(struct rack_dm_region *region);
+int rack_dm_map_region(struct rack_dm_region *region, struct vm_area_struct *vma, struct vm_operations_struct *vm_ops);
 struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size);
 void rack_dm_free_region(struct rack_dm_region *region);
 
