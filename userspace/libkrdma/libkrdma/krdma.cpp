@@ -19,7 +19,7 @@ static int libkrdma_ioctl(unsigned long cmd, void *buf)
     }
 
     if (ioctl(fd, cmd, buf) < 0) {
-        perror("failed to call an ioctl on krdma device");
+        perror("ioctl failed on krdma device");
         ret = -errno;
         goto out_close_fd;
     }
