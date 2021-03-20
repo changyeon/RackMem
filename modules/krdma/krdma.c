@@ -111,6 +111,7 @@ out:
 static void __exit krdma_exit(void)
 {
     krdma_cm_cleanup();
+    krdma_free_rpc_table();
 
     /* destroy the character device */
     device_destroy(krdma_device_data.class,

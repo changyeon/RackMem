@@ -44,6 +44,7 @@ static long rack_dm_ioctl_mmap(unsigned long arg)
 {
     long ret;
     struct mmap_msg msg;
+    struct krdma_conn *conn;
 
     ret = copy_from_user(&msg, (void __user *) arg, sizeof(msg));
     if (ret) {
@@ -55,6 +56,14 @@ static long rack_dm_ioctl_mmap(unsigned long arg)
     DEBUG_LOG("rack_dm_ioctl_mmap region_id: %llu, remote_region_id: %llu, "
               "remote_node: %s\n", msg.region_id, msg.remote_region_id,
               msg.remote_node);
+
+    conn = krdma_get_node(msg.remote_node);
+
+    ret = get_region_metadata(conn, msg.remote_region_id);
+    if (ret) {
+        pr_err("error on get_region_metadata\n");
+        goto out;
+    }
 
     return 0;
 

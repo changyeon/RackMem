@@ -123,4 +123,9 @@ int write_remote_page(struct krdma_mr *kmr, void *src);
 int update_rdma_node_list(void);
 void free_rdma_node_list(void);
 
+/* rpc */
+int register_rack_dm_rpc(void);
+void unregister_rack_dm_rpc(void);
+int get_region_metadata(struct krdma_conn *conn, u64 region_id);
+
 #endif /* _INCLUDE_RACK_DM_H_ */

@@ -131,6 +131,8 @@ enum krdma_cmd {
     KRDMA_CMD_RESPONSE_ALLOC_REMOTE_MEMORY,
     KRDMA_CMD_REQUEST_FREE_REMOTE_MEMORY,
     KRDMA_CMD_RESPONSE_FREE_REMOTE_MEMORY,
+    KRDMA_CMD_REQUEST_GENERAL_RPC,
+    KRDMA_CMD_RESPONSE_GENERAL_RPC,
     __NR_KRDMA_CMDS
 };
 
@@ -144,7 +146,17 @@ static const char * const krdma_cmds[] = {
     [KRDMA_CMD_REQUEST_ALLOC_REMOTE_MEMORY]  = "REQUEST_ALLOC_REMOTE_MEMORY",
     [KRDMA_CMD_RESPONSE_ALLOC_REMOTE_MEMORY] = "RESPONSE_ALLOC_REMOTE_MEMORY",
     [KRDMA_CMD_REQUEST_FREE_REMOTE_MEMORY]   = "REQUEST_FREE_REMOTE_MEMORY",
-    [KRDMA_CMD_RESPONSE_FREE_REMOTE_MEMORY]  = "RESPONSE_FREE_REMOTE_MEMORY"
+    [KRDMA_CMD_RESPONSE_FREE_REMOTE_MEMORY]  = "RESPONSE_FREE_REMOTE_MEMORY",
+    [KRDMA_CMD_REQUEST_GENERAL_RPC]          = "REQUEST_GENERAL_RPC",
+    [KRDMA_CMD_RESPONSE_GENERAL_RPC]         = "RESPONSE_GENERAL_RPC"
+};
+
+struct krdma_rpc_fmt {
+    u64 cmd;
+    u64 send_ptr;
+    u64 rpc_id;
+    u64 size;
+    u64 payload;
 };
 
 struct krdma_msg_fmt {
@@ -174,6 +186,15 @@ struct krdma_msg {
     struct completion done;
 };
 
+struct krdma_rpc_func {
+    struct hlist_node hn;
+    u32 id;
+    int (*func)(void *, void *);
+};
+
+void krdma_free_rpc_table(void);
+int krdma_register_rpc(u32 id, int (*func)(void *, void *));
+void krdma_unregister_rpc(u64 id);
 struct krdma_msg_pool *krdma_alloc_msg_pool(struct krdma_conn *conn, int n, u64 size);
 void krdma_free_msg_pool(struct krdma_conn *conn, struct krdma_msg_pool *pool);
 struct krdma_msg *krdma_get_msg(struct krdma_msg_pool *pool);
