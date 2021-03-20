@@ -78,6 +78,12 @@ static int start_server(int port)
 
     rack_dm_close(region);
 
+    ret = write(new_fd, &msg, sizeof(msg));
+    if (ret < 0) {
+        perror("failed to write the migration completion message");
+        goto out_close_new_fd;
+    }
+
     close(new_fd);
     close(fd);
 

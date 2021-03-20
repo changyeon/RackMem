@@ -68,7 +68,16 @@ static int migrate_src(char *server, int port)
     msg.region_id = region->id;
     msg.region_size = region->size;
 
-    write(fd, &msg, sizeof(msg));
+    ret = write(fd, &msg, sizeof(msg));
+    if (ret < 0) {
+        perror("failed to write the migration request message");
+        goto out_close_region;
+    }
+    ret = read(fd, &msg, sizeof(msg));
+    if (ret < 0) {
+        perror("failed to read the migration completion message");
+        goto out_close_region;
+    }
 
     close(fd);
 
