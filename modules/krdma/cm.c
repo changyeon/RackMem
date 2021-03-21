@@ -27,7 +27,7 @@ static DEFINE_HASHTABLE(ht_krdma_node, 10);
 
 extern char g_nodename[__NEW_UTS_LEN + 1];
 
-static struct rdma_cm_id *cm_id_server;
+struct rdma_cm_id *cm_id_server;
 
 static void print_device_attr(struct ib_device_attr *dev_attr)
 {
@@ -141,7 +141,8 @@ static void print_conn(struct krdma_conn *conn)
     pr_info("============ print connection info ============\n");
     pr_info("nodename: %s\n", conn->nodename);
     pr_info("cm_id: %p\n", conn->cm_id);
-    pr_info("pd: %p, lkey: %u, rkey: %d\n", conn->pd, conn->lkey, conn->rkey);
+    pr_info("pd: %p, lkey: %u, rkey: %d, remote_rkey: %u\n",
+            conn->pd, conn->lkey, conn->rkey, conn->remote_rkey);
     pr_info("rdma_qp: %p, rpc_qp: %p\n", conn->rdma_qp.qp, conn->rpc_qp.qp);
 
     pr_info("=========== print device attributes ===========\n");
@@ -627,7 +628,7 @@ out:
 static int krdma_cm_established_server(struct krdma_conn *conn)
 {
     int ret = 0;
-    struct krdma_msg_fmt *msg;
+    struct qp_msg_fmt *fmt;
 
     /* create an additional QP for rpc */
     ret = allocate_rpc_qp(conn);
@@ -650,18 +651,17 @@ static int krdma_cm_established_server(struct krdma_conn *conn)
               conn->rpc_qp.local_qpn, conn->rpc_qp.local_psn,
               conn->rpc_qp.local_lid);
 
-    msg = (struct krdma_msg_fmt *) conn->send_msg->vaddr;
-    msg->cmd = KRDMA_CMD_HANDSHAKE_RPC_QP;
-    msg->arg1 = conn->rpc_qp.local_qpn;
-    msg->arg2 = conn->rpc_qp.local_psn;
-    msg->arg3 = conn->rpc_qp.local_lid;
+    fmt = (struct qp_msg_fmt *) conn->send_msg->vaddr;
+    fmt->qpn = conn->rpc_qp.local_qpn;
+    fmt->psn = conn->rpc_qp.local_psn;
+    fmt->lid = conn->rpc_qp.local_lid;
 
     handshake_server(conn);
 
-    msg = (struct krdma_msg_fmt *) conn->recv_msg->vaddr;
-    conn->rpc_qp.remote_qpn = msg->arg1;
-    conn->rpc_qp.remote_psn = msg->arg2;
-    conn->rpc_qp.remote_lid = msg->arg3;
+    fmt = (struct qp_msg_fmt *) conn->recv_msg->vaddr;
+    conn->rpc_qp.remote_qpn = fmt->qpn;
+    conn->rpc_qp.remote_psn = fmt->psn;
+    conn->rpc_qp.remote_lid = fmt->lid;
 
     DEBUG_LOG("remote_qpn: %u, remote_psn: %u, remote_lid: %u\n",
               conn->rpc_qp.remote_qpn, conn->rpc_qp.remote_psn,
@@ -673,11 +673,30 @@ static int krdma_cm_established_server(struct krdma_conn *conn)
         pr_err("error on connect_rpc_qp: %d\n", ret);
         goto out;
     }
-
     handshake_server(conn);
 
+    /* register krdma rpc functions */
+    ret = register_all_krdma_rpc();
+    if (ret) {
+        pr_err("error on register_all_krdma_rpc\n");
+        goto out;
+    }
+    handshake_server(conn);
+
+    /* get remote_rkey */
+    ret = krdma_get_remote_rkey(conn);
+    if (ret < 0) {
+        pr_err("error on krdma_get_remote_rkey\n");
+        goto out;
+    }
+    conn->remote_rkey = ret;
+
     /* update the remote node name and add it to the node hash table */
-    krdma_get_node_name(conn, conn->nodename);
+    ret = krdma_get_node_name(conn, conn->nodename);
+    if (ret) {
+        pr_err("error on krdma_get_node_name\n");
+        goto out;
+    }
     add_krdma_node(conn);
 
     if (g_debug)
@@ -703,7 +722,7 @@ out:
 static int krdma_cm_established_client(struct krdma_conn *conn)
 {
     int ret = 0;
-    struct krdma_msg_fmt *msg;
+    struct qp_msg_fmt *fmt;
 
     /* create an additional QP for rpc */
     ret = allocate_rpc_qp(conn);
@@ -726,18 +745,17 @@ static int krdma_cm_established_client(struct krdma_conn *conn)
               conn->rpc_qp.local_qpn, conn->rpc_qp.local_psn,
               conn->rpc_qp.local_lid);
 
-    msg = (struct krdma_msg_fmt *) conn->send_msg->vaddr;
-    msg->cmd = KRDMA_CMD_HANDSHAKE_RPC_QP;
-    msg->arg1 = conn->rpc_qp.local_qpn;
-    msg->arg2 = conn->rpc_qp.local_psn;
-    msg->arg3 = conn->rpc_qp.local_lid;
+    fmt = (struct qp_msg_fmt *) conn->send_msg->vaddr;
+    fmt->qpn = conn->rpc_qp.local_qpn;
+    fmt->psn = conn->rpc_qp.local_psn;
+    fmt->lid = conn->rpc_qp.local_lid;
 
     handshake_client(conn);
 
-    msg = (struct krdma_msg_fmt *) conn->recv_msg->vaddr;
-    conn->rpc_qp.remote_qpn = msg->arg1;
-    conn->rpc_qp.remote_psn = msg->arg2;
-    conn->rpc_qp.remote_lid = msg->arg3;
+    fmt = (struct qp_msg_fmt *) conn->recv_msg->vaddr;
+    conn->rpc_qp.remote_qpn = fmt->qpn;
+    conn->rpc_qp.remote_psn = fmt->psn;
+    conn->rpc_qp.remote_lid = fmt->lid;
 
     DEBUG_LOG("remote_qpn: %u, remote_psn: %u, remote_lid: %u\n",
               conn->rpc_qp.remote_qpn, conn->rpc_qp.remote_psn,
@@ -749,11 +767,30 @@ static int krdma_cm_established_client(struct krdma_conn *conn)
         pr_err("error on connect_rpc_qp: %d\n", ret);
         goto out;
     }
-
     handshake_client(conn);
 
+    /* register krdma rpc functions */
+    ret = register_all_krdma_rpc();
+    if (ret) {
+        pr_err("error on register_all_krdma_rpc\n");
+        goto out;
+    }
+    handshake_client(conn);
+
+    /* get remote_rkey */
+    ret = krdma_get_remote_rkey(conn);
+    if (ret < 0) {
+        pr_err("error on krdma_get_remote_rkey\n");
+        goto out;
+    }
+    conn->remote_rkey = ret;
+
     /* update the remote node name and add it to the node hash table */
-    krdma_get_node_name(conn, conn->nodename);
+    ret = krdma_get_node_name(conn, conn->nodename);
+    if (ret) {
+        pr_err("error on krdma_get_node_name\n");
+        goto out;
+    }
     add_krdma_node(conn);
 
     if (g_debug)

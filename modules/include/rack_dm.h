@@ -77,6 +77,10 @@ struct rack_dm_page {
     u64 index;
     void *buf;
     struct krdma_mr *kmr;
+
+    u64 remote_paddr;
+    u64 remote_vaddr;
+
     spinlock_t lock;
 };
 
@@ -124,8 +128,10 @@ int update_rdma_node_list(void);
 void free_rdma_node_list(void);
 
 /* rpc */
-int register_rack_dm_rpc(void);
-void unregister_rack_dm_rpc(void);
+int rack_dm_update_node_list(void);
+void rack_dm_destroy_node_list(void);
+int rack_dm_register_rpc(void);
+void rack_dm_unregister_rpc(void);
 int get_region_metadata(struct krdma_conn *conn, u64 region_id);
 
 #endif /* _INCLUDE_RACK_DM_H_ */

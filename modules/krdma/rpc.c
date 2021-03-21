@@ -10,6 +10,7 @@
 #include <krdma.h>
 
 extern int g_debug;
+extern struct rdma_cm_id *cm_id_server;
 
 #define DEBUG_LOG if (g_debug) pr_info
 
@@ -36,12 +37,12 @@ static int krdma_rpc_execute_function(u32 id, void *input, void *output)
         goto out;
     }
 
-    if (ret) {
+    if (ret < 0) {
         pr_err("error on the rpc call id: %u\n", id);
         goto out;
     }
 
-    return 0;
+    return ret;
 
 out:
     return ret;
@@ -51,6 +52,8 @@ int krdma_register_rpc(u32 id, int (*func)(void *, void *))
 {
     int ret;
     struct krdma_rpc_func *rpc;
+
+    DEBUG_LOG("krdma_register_rpc id: %u, func: %p\n", id, func);
 
     rpc = kzalloc(sizeof(*rpc), GFP_KERNEL);
     if (rpc == NULL) {
@@ -73,9 +76,11 @@ out:
 }
 EXPORT_SYMBOL(krdma_register_rpc);
 
-void krdma_unregister_rpc(u64 id)
+void krdma_unregister_rpc(u32 id)
 {
     struct krdma_rpc_func *curr;
+
+    DEBUG_LOG("krdma_unregister_rpc id: %u\n", id);
 
     hash_for_each_possible(ht_rpc, curr, hn, id) {
         if (curr->id == id) {
@@ -236,28 +241,18 @@ void krdma_put_msg(struct krdma_msg_pool *pool, struct krdma_msg *kmsg)
     spin_unlock(&pool->lock);
 }
 
-static int rpc_response_general_rpc(struct krdma_conn *conn,
-                                    struct krdma_msg *recv_msg)
-{
-    struct krdma_msg *send_msg;
-    struct krdma_rpc_fmt *recv_buf;
-
-    recv_buf = (struct krdma_rpc_fmt *) recv_msg->vaddr;
-    send_msg = (struct krdma_msg *) recv_buf->send_ptr;
-
-    complete(&send_msg->done);
-
-    return 0;
-}
-
-static int rpc_request_general_rpc(struct krdma_conn *conn,
-                                   struct krdma_msg *recv_msg)
+static int rkey_request_handler(struct krdma_conn *conn,
+                                struct krdma_msg *recv_msg)
 {
     int ret;
     struct krdma_msg *send_msg;
-    struct krdma_rpc_fmt *send_buf;
-    struct krdma_rpc_fmt *recv_buf;
+    struct rpc_msg_fmt *send_buf;
+    struct rpc_msg_fmt *recv_buf;
     const struct ib_send_wr *bad_send_wr;
+
+    DEBUG_LOG("rkey_request_handler rkey: %u\n", conn->rkey);
+
+    recv_buf = (struct rpc_msg_fmt *) recv_msg->vaddr;
 
     send_msg = krdma_alloc_msg(conn, 4096);
     if (send_msg == NULL) {
@@ -265,24 +260,87 @@ static int rpc_request_general_rpc(struct krdma_conn *conn,
         ret = -ENOMEM;
         goto out;
     }
-    send_buf = (struct krdma_rpc_fmt *) send_msg->vaddr;
-    recv_buf = (struct krdma_rpc_fmt *) recv_msg->vaddr;
+    send_buf = (struct rpc_msg_fmt *) send_msg->vaddr;
 
-    ret = krdma_rpc_execute_function(
+    send_buf->cmd = KRDMA_CMD_RKEY_RESPONSE;
+    send_buf->request_id = recv_buf->request_id;
+    send_buf->payload = conn->rkey;
+
+    send_msg->send_wr.wr_id = (u64) send_msg;
+
+    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out_free_msg;
+    }
+
+    return 0;
+
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
+out:
+    return ret;
+}
+
+static int rkey_response_handler(struct krdma_conn *conn,
+                                 struct krdma_msg *recv_msg)
+{
+    struct krdma_msg *send_msg;
+    struct rpc_msg_fmt *recv_buf;
+    struct rpc_msg_fmt *send_buf;
+
+    recv_buf = (struct rpc_msg_fmt *) recv_msg->vaddr;
+    send_msg = (struct krdma_msg *) recv_buf->request_id;
+    send_buf = (struct rpc_msg_fmt *) send_msg->vaddr;
+
+    DEBUG_LOG("rkey_response_handler rkey: %llu\n", recv_buf->payload);
+
+    send_buf->payload = recv_buf->payload;
+
+    complete(&send_msg->done);
+
+    return 0;
+}
+
+static int general_rpc_request_handler(struct krdma_conn *conn,
+                                       struct krdma_msg *recv_msg)
+{
+    int ret;
+    struct krdma_msg *send_msg;
+    struct rpc_msg_fmt *send_buf;
+    struct rpc_msg_fmt *recv_buf;
+    const struct ib_send_wr *bad_send_wr;
+
+    recv_buf = (struct rpc_msg_fmt *) recv_msg->vaddr;
+
+    DEBUG_LOG("rpc_request_general_rpc id: %u, request_id: %llu, size: %u\n",
+              recv_buf->rpc_id, recv_buf->request_id, recv_buf->size);
+
+    send_msg = krdma_alloc_msg(conn, 4096);
+    if (send_msg == NULL) {
+        pr_err("error on krdma_alloc_msg\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+    send_buf = (struct rpc_msg_fmt *) send_msg->vaddr;
+
+    send_buf->cmd = KRDMA_CMD_GENERAL_RPC_RESPONSE;
+    send_buf->rpc_id = recv_buf->rpc_id;
+    send_buf->request_id = recv_buf->request_id;
+
+    send_buf->ret = krdma_rpc_execute_function(
             recv_buf->rpc_id,
             (void *) &recv_buf->payload,
             (void *) &send_buf->payload);
 
-    if (ret) {
-        pr_err("error on krdma_rpc_execute_function %llu\n", recv_buf->rpc_id);
-        goto out_free_msg;
-    }
+    if (send_buf->ret >= 0)
+        send_buf->size = send_buf->ret;
 
-    send_buf->cmd = KRDMA_CMD_RESPONSE_GENERAL_RPC;
-    send_buf->send_ptr = recv_buf->send_ptr;
-    send_buf->rpc_id = recv_buf->rpc_id;
+    DEBUG_LOG("rpc_request_general_rpc_id send_buf ret: %d, size: %u\n",
+              send_buf->ret, send_buf->size);
 
     send_msg->send_wr.wr_id = (u64) send_msg;
+
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
     if (ret) {
         pr_err("error on ib_post_send: %d\n", ret);
@@ -297,525 +355,57 @@ out:
     return ret;
 }
 
-static int rpc_response_alloc_remote_memory(struct krdma_conn *conn,
-                                            struct krdma_msg *recv_msg)
+static int general_rpc_response_handler(struct krdma_conn *conn,
+                                        struct krdma_msg *recv_msg)
 {
     struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *recv_buf;
-    struct krdma_mr *kmr = NULL;
+    struct rpc_msg_fmt *recv_buf;
+    struct rpc_msg_fmt *send_buf;
 
-    recv_buf = (struct krdma_msg_fmt *) recv_msg->vaddr;
+    recv_buf = (struct rpc_msg_fmt *) recv_msg->vaddr;
+    send_msg = (struct krdma_msg *) recv_buf->request_id;
+    send_buf = (struct rpc_msg_fmt *) send_msg->vaddr;
 
-    send_msg = (struct krdma_msg *) recv_buf->arg1;
-    kmr = (struct krdma_mr *) recv_buf->arg2;
-    kmr->conn = conn;
-    kmr->size = recv_buf->arg3;
-    kmr->vaddr = recv_buf->arg4;
-    kmr->paddr = (dma_addr_t) recv_buf->arg5;
-    kmr->rkey = recv_buf->arg6;
+    DEBUG_LOG("rpc_response_general_rpc id: %u, request_id: %llu, size: %u\n",
+              recv_buf->rpc_id, recv_buf->request_id, recv_buf->size);
+
+    if (recv_buf->size > 0) {
+        send_buf->size = recv_buf->size;
+        memcpy(&send_buf->payload, &recv_buf->payload, recv_buf->size);
+    }
 
     complete(&send_msg->done);
 
     return 0;
 }
 
-static int rpc_request_alloc_remote_memory(struct krdma_conn *conn,
-                                           struct krdma_msg *recv_msg)
-{
-    int ret = 0;
-    const struct ib_send_wr *bad_send_wr;
-    struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *send_buf;
-    struct krdma_msg_fmt *recv_buf;
-    size_t size;
-    dma_addr_t paddr;
-    void *vaddr;
-
-    recv_buf = (struct krdma_msg_fmt *) recv_msg->vaddr;
-    size = (size_t) recv_buf->arg3;
-
-    vaddr = dma_alloc_coherent(
-            conn->pd->device->dma_device, size, &paddr, GFP_KERNEL);
-    if (vaddr == NULL) {
-        pr_err("failed to allocate memory for kmr buffer\n");
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    send_msg = krdma_alloc_msg(conn, 128);
-    if (send_msg == NULL) {
-        pr_err("error on krmda_alloc_msg\n");
-        ret = -ENOMEM;
-        goto out_dma_free;
-    }
-
-    send_buf = (struct krdma_msg_fmt *) send_msg->vaddr;
-    send_buf->cmd = KRDMA_CMD_RESPONSE_ALLOC_REMOTE_MEMORY;
-    send_buf->arg1 = recv_buf->arg1;
-    send_buf->arg2 = recv_buf->arg2;
-    send_buf->arg3 = recv_buf->arg3;
-    send_buf->arg4 = (u64) vaddr;
-    send_buf->arg5 = (u64) paddr;
-    send_buf->arg6 = (u64) conn->rkey;
-
-    send_msg->send_wr.wr_id = (u64) send_msg;
-    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send: %d\n", ret);
-        goto out_free_msg;
-    }
-
-    return 0;
-
-out_free_msg:
-    krdma_free_msg(conn, send_msg);
-out_dma_free:
-    dma_free_coherent(conn->pd->device->dma_device, size, vaddr, paddr);
-out:
-    return ret;
-}
-
-/**
- * Allocate remote memory
- */
-struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size)
-{
-    int ret;
-    struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *send_buf;
-    struct krdma_mr *kmr = NULL;
-    const struct ib_send_wr *bad_send_wr;
-
-    send_msg = krdma_alloc_msg(conn, 128);
-    if (send_msg == NULL) {
-        pr_err("error on krmda_alloc_msg\n");
-        goto out;
-    }
-
-    kmr = kzalloc(sizeof(*kmr), GFP_KERNEL);
-    if (kmr == NULL) {
-        pr_err("failed to allocate memory for kmr\n");
-        goto out_free_msg;
-    }
-
-    send_buf = (struct krdma_msg_fmt *) send_msg->vaddr;
-    send_buf->cmd = KRDMA_CMD_REQUEST_ALLOC_REMOTE_MEMORY;
-    send_buf->arg1 = (u64) send_msg;
-    send_buf->arg2 = (u64) kmr;
-    send_buf->arg3 = (u64) size;
-
-    init_completion(&send_msg->done);
-    send_msg->send_wr.wr_id = 0ULL;
-
-    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send: %d\n", ret);
-        goto out_free_kmr;
-    }
-
-    ret = wait_for_completion_timeout(
-            &send_msg->done, msecs_to_jiffies(KRDMA_CM_TIMEOUT) + 1);
-    if (ret == 0) {
-        pr_err("timeout in krdma_alloc_remote_memory\n");
-        goto out_free_kmr;
-    }
-
-    krdma_free_msg(conn, send_msg);
-
-    return kmr;
-
-out_free_kmr:
-    kfree(kmr);
-out_free_msg:
-    krdma_free_msg(conn, send_msg);
-out:
-    return NULL;
-}
-EXPORT_SYMBOL(krdma_alloc_remote_memory);
-
-static int rpc_response_free_remote_memory(struct krdma_conn *conn,
-                                           struct krdma_msg *recv_msg)
-{
-    int ret = 0;
-    struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *recv_buf;
-
-    recv_buf = (struct krdma_msg_fmt *) recv_msg->vaddr;
-
-    send_msg = (struct krdma_msg *) recv_buf->arg1;
-    ret = (int) recv_buf->arg2;
-    if (ret) {
-        pr_err("failed to free remote memory\n");
-        goto out;
-    }
-    complete(&send_msg->done);
-
-    return 0;
-
-out:
-    complete(&send_msg->done);
-
-    return ret;
-}
-
-
-static int rpc_request_free_remote_memory(struct krdma_conn *conn,
-                                          struct krdma_msg *recv_msg)
-{
-    int ret = 0;
-    const struct ib_send_wr *bad_send_wr;
-    struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *send_buf;
-    struct krdma_msg_fmt *recv_buf;
-    size_t size;
-    dma_addr_t paddr;
-    void *vaddr;
-
-    recv_buf = (struct krdma_msg_fmt *) recv_msg->vaddr;
-
-    size = recv_buf->arg2;
-    vaddr = (void *) recv_buf->arg3;
-    paddr = (dma_addr_t) recv_buf->arg4;
-
-    dma_free_coherent(conn->pd->device->dma_device, size, vaddr, paddr);
-
-    send_msg = krdma_alloc_msg(conn, 128);
-    if (send_msg == NULL) {
-        pr_err("error on krmda_allo_msg\n");
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    send_buf = (struct krdma_msg_fmt *) send_msg->vaddr;
-    send_buf->cmd = KRDMA_CMD_RESPONSE_FREE_REMOTE_MEMORY;
-    send_buf->arg1 = recv_buf->arg1;
-    send_buf->arg2 = 0;
-
-    send_msg->send_wr.wr_id = (u64) send_msg;
-    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send: %d\n", ret);
-        goto out_free_msg;
-    }
-
-    return 0;
-
-out_free_msg:
-    krdma_free_msg(conn, send_msg);
-out:
-    return ret;
-}
-
-/**
- * Free remote memory
- */
-int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr)
-{
-    int ret = 0;
-    struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *send_buf;
-    const struct ib_send_wr *bad_send_wr;
-
-    send_msg = krdma_alloc_msg(conn, 128);
-    if (send_msg == NULL) {
-        ret = -ENOMEM;
-        pr_err("error on krmda_alloc_msg\n");
-        goto out;
-    }
-
-    send_buf = (struct krdma_msg_fmt *) send_msg->vaddr;
-    send_buf->cmd = KRDMA_CMD_REQUEST_FREE_REMOTE_MEMORY;
-    send_buf->arg1 = (u64) send_msg;
-    send_buf->arg2 = (u64) kmr->size;
-    send_buf->arg3 = (u64) kmr->vaddr;
-    send_buf->arg4 = (u64) kmr->paddr;
-
-    init_completion(&send_msg->done);
-    send_msg->send_wr.wr_id = 0ULL;
-
-    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send: %d\n", ret);
-        goto out;
-    }
-
-    ret = wait_for_completion_timeout(
-            &send_msg->done, msecs_to_jiffies(KRDMA_CM_TIMEOUT) + 1);
-    if (ret == 0) {
-        pr_err("timeout in krdma_get_node_name: %d\n", ret);
-        goto out;
-    }
-
-    krdma_free_msg(conn, send_msg);
-    kfree(kmr);
-
-    return 0;
-
-out:
-    krdma_free_msg(conn, send_msg);
-    kfree(kmr);
-
-    return ret;
-}
-EXPORT_SYMBOL(krdma_free_remote_memory);
-
-static int rpc_request_node_name(struct krdma_conn *conn,
-                                 struct krdma_msg *recv_msg)
-{
-    int ret = 0;
-    const struct ib_send_wr *bad_send_wr;
-    struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *send_buf;
-    struct krdma_msg_fmt *recv_buf;
-    char *src, *dst;
-
-    send_msg = krdma_alloc_msg(conn, 256);
-    if (send_msg == NULL) {
-        pr_err("error on krdma_alloc_msg\n");
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    send_buf = (struct krdma_msg_fmt *) send_msg->vaddr;
-    recv_buf = (struct krdma_msg_fmt *) recv_msg->vaddr;
-
-    send_buf->cmd = KRDMA_CMD_RESPONSE_NODE_NAME;
-    send_buf->arg1 = recv_buf->arg1;
-    send_buf->arg2 = recv_buf->arg2;
-
-    src = g_nodename;
-    dst = (char *) &send_buf->arg3;
-    strcpy(dst, src);
-
-    send_msg->send_wr.wr_id = (u64) send_msg;
-    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send: %d\n", ret);
-        goto out_free_msg;
-    }
-
-    return 0;
-
-out_free_msg:
-    krdma_free_msg(conn, send_msg);
-out:
-    return ret;
-}
-
-static int rpc_response_node_name(struct krdma_conn *conn,
-                                  struct krdma_msg *recv_msg)
-{
-    struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *recv_buf;
-    char *dst, *src;
-
-    recv_buf = (struct krdma_msg_fmt *) recv_msg->vaddr;
-
-    dst = (char *) recv_buf->arg1;
-    src = (char *) &recv_buf->arg3;
-
-    strcpy(dst, src);
-
-    send_msg = (struct krdma_msg *) recv_buf->arg2;
-    complete(&send_msg->done);
-
-    return 0;
-}
-
-/**
- * Get remote side's node name of the connection.
- */
-int krdma_get_node_name(struct krdma_conn *conn, char *dst)
-{
-    int ret = 0;
-    const struct ib_send_wr *bad_send_wr;
-    struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *msg;
-
-    send_msg = krdma_alloc_msg(conn, 256);
-    if (send_msg == NULL) {
-        pr_err("error on krdma_alloc_msg\n");
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    msg = (struct krdma_msg_fmt *) send_msg->vaddr;
-
-    msg->cmd = KRDMA_CMD_REQUEST_NODE_NAME;
-    msg->arg1 = (u64) dst;
-    msg->arg2 = (u64) send_msg;
-    msg->arg3 = 0ULL;
-
-    init_completion(&send_msg->done);
-    /* to prevent freeing this msg in the comp handler */
-    send_msg->send_wr.wr_id = 0ULL;
-
-    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send: %d\n", ret);
-        goto out_free_msg;
-    }
-
-    ret = wait_for_completion_timeout(
-            &send_msg->done, msecs_to_jiffies(KRDMA_CM_TIMEOUT) + 1);
-    if (ret == 0) {
-        pr_err("timeout in krdma_get_node_name\n");
-        goto out_free_msg;
-    }
-
-    krdma_free_msg(conn, send_msg);
-
-    return 0;
-
-out_free_msg:
-    krdma_free_msg(conn, send_msg);
-out:
-    return ret;
-}
-
-static int rpc_request_dummy(struct krdma_conn *conn,
+static int krdma_rpc_handler(struct krdma_conn *conn,
                              struct krdma_msg *recv_msg)
 {
     int ret = 0;
-    struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *send_buf;
-    struct krdma_msg_fmt *recv_buf;
-    const struct ib_send_wr *bad_send_wr;
+    struct rpc_msg_fmt *fmt = (struct rpc_msg_fmt *) recv_msg->vaddr;
 
-    send_msg = krdma_alloc_msg(conn, 32);
-    if (send_msg == NULL) {
-        pr_err("error on krdma_alloc_msg\n");
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    recv_buf = (struct krdma_msg_fmt *) recv_msg->vaddr;
-
-    send_buf = (struct krdma_msg_fmt *) send_msg->vaddr;
-    send_buf->cmd = KRDMA_CMD_RESPONSE_DUMMY;
-    send_buf->arg1 = recv_buf->arg1;
-    send_msg->send_wr.wr_id = (u64) send_msg;
-
-    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send: %d\n", ret);
-        goto out_free_msg;
-    }
-
-    return 0;
-
-out_free_msg:
-    krdma_free_msg(conn, send_msg);
-out:
-    return ret;
-}
-
-static int rpc_response_dummy(struct krdma_conn *conn,
-                              struct krdma_msg *recv_msg)
-{
-    struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *recv_buf;
-
-    recv_buf = (struct krdma_msg_fmt *) recv_msg->vaddr;
-    send_msg = (struct krdma_msg *) recv_buf->arg1;
-    complete(&send_msg->done);
-
-    return 0;
-}
-
-int krdma_dummy_rpc(struct krdma_conn *conn)
-{
-    int ret = 0;
-    struct krdma_msg *send_msg;
-    struct krdma_msg_fmt *send_buf;
-    const struct ib_send_wr *bad_send_wr;
-
-    send_msg = krdma_alloc_msg(conn, 32);
-    if (send_msg == NULL) {
-        pr_err("error on krdma_alloc_msg\n");
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    send_buf = (struct krdma_msg_fmt *) send_msg->vaddr;
-    send_buf->cmd = KRDMA_CMD_REQUEST_DUMMY;
-    send_buf->arg1 = (u64) send_msg;
-
-    init_completion(&send_msg->done);
-    send_msg->send_wr.wr_id = 0ULL;
-
-    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send: %d\n", ret);
-        goto out_free_msg;
-    }
-
-    ret = wait_for_completion_timeout(
-            &send_msg->done, msecs_to_jiffies(KRDMA_CM_TIMEOUT) + 1);
-    if (ret == 0) {
-        pr_err("timeout in krdma_alloc_remote_memory\n");
-        ret = -ETIMEDOUT;
-        goto out_free_msg;
-    }
-
-    krdma_free_msg(conn, send_msg);
-
-    return 0;
-
-out_free_msg:
-    krdma_free_msg(conn, send_msg);
-out:
-    return ret;
-}
-
-static int krdma_rpc_handler(struct krdma_conn *conn, struct krdma_msg *recv_msg)
-{
-    int ret = 0;
-    struct krdma_msg_fmt *msg = (struct krdma_msg_fmt *) recv_msg->vaddr;
-
-    DEBUG_LOG("rpc_handler cmd: %s (%llu, %llu, %llu, %llu, %llu, %llu)\n",
-              krdma_cmds[msg->cmd], msg->arg1, msg->arg2, msg->arg3, msg->arg4,
-              msg->arg5, msg->arg6);
-
-    switch (msg->cmd) {
-        case KRDMA_CMD_REQUEST_DUMMY:
-            ret = rpc_request_dummy(conn, recv_msg);
+    switch (fmt->cmd) {
+        case KRDMA_CMD_RKEY_REQUEST:
+            ret = rkey_request_handler(conn, recv_msg);
             break;
-        case KRDMA_CMD_RESPONSE_DUMMY:
-            ret = rpc_response_dummy(conn, recv_msg);
+        case KRDMA_CMD_RKEY_RESPONSE:
+            ret = rkey_response_handler(conn, recv_msg);
             break;
-        case KRDMA_CMD_REQUEST_NODE_NAME:
-            ret = rpc_request_node_name(conn, recv_msg);
+        case KRDMA_CMD_GENERAL_RPC_REQUEST:
+            ret = general_rpc_request_handler(conn, recv_msg);
             break;
-        case KRDMA_CMD_RESPONSE_NODE_NAME:
-            ret = rpc_response_node_name(conn, recv_msg);
-            break;
-        case KRDMA_CMD_REQUEST_ALLOC_REMOTE_MEMORY:
-            ret = rpc_request_alloc_remote_memory(conn, recv_msg);
-            break;
-        case KRDMA_CMD_RESPONSE_ALLOC_REMOTE_MEMORY:
-            ret = rpc_response_alloc_remote_memory(conn, recv_msg);
-            break;
-        case KRDMA_CMD_REQUEST_FREE_REMOTE_MEMORY:
-            ret = rpc_request_free_remote_memory(conn, recv_msg);
-            break;
-        case KRDMA_CMD_RESPONSE_FREE_REMOTE_MEMORY:
-            ret = rpc_response_free_remote_memory(conn, recv_msg);
-            break;
-        case KRDMA_CMD_REQUEST_GENERAL_RPC:
-            ret = rpc_request_general_rpc(conn, recv_msg);
-            break;
-        case KRDMA_CMD_RESPONSE_GENERAL_RPC:
-            ret = rpc_response_general_rpc(conn, recv_msg);
+        case KRDMA_CMD_GENERAL_RPC_RESPONSE:
+            ret = general_rpc_response_handler(conn, recv_msg);
             break;
         default:
-            pr_err("unexpected rpc command %llu\n", msg->cmd);
+            pr_err("unexpected rpc command %u\n", fmt->cmd);
             ret = -EINVAL;
             break;
     }
 
     if (ret) {
-        pr_err("error on rpc: %s\n", krdma_cmds[msg->cmd]);
+        pr_err("error on rpc: %s\n", krdma_cmds[fmt->cmd]);
         goto out;
     }
 
@@ -931,4 +521,374 @@ void krdma_poll_work(struct work_struct *ws)
             continue;
         }
     }
+}
+
+int krdma_send_rpc_request(struct krdma_conn *conn, struct krdma_msg *msg)
+{
+    int ret;
+    struct rpc_msg_fmt *fmt;
+    const struct ib_send_wr *bad_send_wr;
+
+    fmt = (struct rpc_msg_fmt *) msg->vaddr;
+    fmt->cmd = KRDMA_CMD_GENERAL_RPC_REQUEST;
+    fmt->request_id = (u64) msg;
+    fmt->ret = 0;
+
+    init_completion(&msg->done);
+    msg->send_wr.wr_id = 0;
+
+    ret = ib_post_send(conn->rpc_qp.qp, &msg->send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
+
+    ret = wait_for_completion_timeout(
+            &msg->done, msecs_to_jiffies(100) + 1);
+    if (ret == 0) {
+        pr_err("timeout in krdma_send_rpc_request id: %u\n", fmt->rpc_id);
+        ret = -ETIMEDOUT;
+        goto out;
+    }
+
+    return 0;
+
+out:
+    return ret;
+}
+EXPORT_SYMBOL(krdma_send_rpc_request);
+
+int krdma_get_remote_rkey(struct krdma_conn *conn)
+{
+    int ret;
+    struct krdma_msg *send_msg;
+    struct rpc_msg_fmt *fmt;
+    const struct ib_send_wr *bad_send_wr;
+
+    DEBUG_LOG("krdma_get_remote_rkey\n");
+
+    send_msg = krdma_alloc_msg(conn, 4096);
+    if (send_msg == NULL) {
+        pr_err("error on krdma_alloc_msg\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
+    fmt->cmd = KRDMA_CMD_RKEY_REQUEST;
+    fmt->request_id = (u64) send_msg;
+    fmt->size = 0;
+
+    init_completion(&send_msg->done);
+    send_msg->send_wr.wr_id = 0;
+
+    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out_free_msg;
+    }
+
+    ret = wait_for_completion_timeout(
+            &send_msg->done, msecs_to_jiffies(100) + 1);
+    if (ret == 0) {
+        pr_err("timeout in krdma_get_remote_rkey\n");
+        ret = -ETIMEDOUT;
+        goto out_free_msg;
+    }
+
+    if (fmt->ret < 0) {
+        pr_err("failed rpc request %d\n", fmt->rpc_id);
+        ret = -EINVAL;
+        goto out_free_msg;
+    }
+
+    ret = (int) fmt->payload;
+
+    krdma_free_msg(conn, send_msg);
+
+    return ret;
+
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
+out:
+    return ret;
+}
+
+static int dummy_rpc_handler(void *input, void *output)
+{
+    int ret = 0;
+    u64 val;
+
+    val = *((u64 *) input);
+    *((u64 *) output) = val + 1;
+
+    ret += sizeof(u64);
+
+    return ret;
+}
+
+int krdma_dummy_rpc(struct krdma_conn *conn, u64 val)
+{
+    int ret;
+    struct krdma_msg *send_msg;
+    struct rpc_msg_fmt *fmt;
+
+    send_msg = krdma_alloc_msg(conn, 4096);
+    if (send_msg == NULL) {
+        pr_err("error on krdma_alloc_msg\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
+    fmt->rpc_id = KRDMA_RPC_DUMMY;
+
+    fmt->payload = val;
+    fmt->size = sizeof(u64);
+
+    ret = krdma_send_rpc_request(conn, send_msg);
+    if (ret) {
+        pr_err("error on krdma_send_rpc_request\n");
+        goto out_free_msg;
+    }
+
+    if (fmt->ret < 0) {
+        pr_err("failed rpc request %d\n", fmt->rpc_id);
+        ret = -EINVAL;
+        goto out_free_msg;
+    }
+
+    DEBUG_LOG("val: %llu, result: %llu\n", val, fmt->payload);
+
+    val = fmt->payload;
+
+    krdma_free_msg(conn, send_msg);
+
+    return val;
+
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
+out:
+    return ret;
+}
+
+static int get_node_name_rpc_handler(void *input, void *output)
+{
+    int ret = 0;
+
+    strcpy(output, g_nodename);
+    ret = strlen(g_nodename) + 1;
+
+    DEBUG_LOG("get_node_name_rpc_handler %s, %d\n", g_nodename, ret);
+
+    return ret;
+}
+
+int krdma_get_node_name(struct krdma_conn *conn, char *dst)
+{
+    int ret;
+    struct krdma_msg *send_msg;
+    struct rpc_msg_fmt *fmt;
+
+    DEBUG_LOG("krdma_get_node_name\n");
+
+    send_msg = krdma_alloc_msg(conn, 4096);
+    if (send_msg == NULL) {
+        pr_err("error on krdma_alloc_msg\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
+    fmt->rpc_id = KRDMA_RPC_GET_NODE_NAME;
+    fmt->size = 0;
+
+    ret = krdma_send_rpc_request(conn, send_msg);
+    if (ret) {
+        pr_err("error on krdma_send_rpc_request\n");
+        goto out_free_msg;
+    }
+
+    if (fmt->ret < 0) {
+        pr_err("failed rpc request %d\n", fmt->rpc_id);
+        ret = -EINVAL;
+        goto out_free_msg;
+    }
+
+    strcpy(dst, (void *) &fmt->payload);
+
+    krdma_free_msg(conn, send_msg);
+
+    return 0;
+
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
+out:
+    return ret;
+}
+EXPORT_SYMBOL(krdma_get_node_name);
+
+static int alloc_remote_memory_rpc_handler(void *input, void *output)
+{
+    int ret = 0;
+    void *vaddr;
+    u64 size, paddr;
+    struct ib_device *ib_dev = cm_id_server->device;
+
+    size = *((u64 *) input);
+
+    vaddr = dma_alloc_coherent(ib_dev->dma_device, size, &paddr, GFP_KERNEL);
+    if (vaddr == NULL) {
+        pr_err("failed to allocate memory for kmr buffer\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    *((u64 *) ((u64) output + 0UL * sizeof(u64))) = (u64) vaddr;
+    *((u64 *) ((u64) output + 1UL * sizeof(u64))) = (u64) paddr;
+
+    ret = 2UL * sizeof(u64);
+
+    return ret;
+
+out:
+    return ret;
+}
+
+struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size)
+{
+    int ret;
+    struct krdma_mr *kmr = NULL;
+    struct krdma_msg *send_msg;
+    struct rpc_msg_fmt *fmt;
+
+    kmr = kzalloc(sizeof(*kmr), GFP_KERNEL);
+    if (kmr == NULL) {
+        pr_err("failed to allocate memory for kmr\n");
+        goto out;
+    }
+
+    send_msg = krdma_alloc_msg(conn, 4096);
+    if (send_msg == NULL) {
+        pr_err("error on krdma_alloc_msg\n");
+        goto out_free_kmr;
+    }
+
+    fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
+    fmt->rpc_id = KRDMA_RPC_ALLOC_REMOTE_MEMORY;
+
+    fmt->payload = size;
+    fmt->size = sizeof(u64);
+
+    ret = krdma_send_rpc_request(conn, send_msg);
+    if (ret) {
+        pr_err("error on krdma_send_rpc_request\n");
+        goto out_free_msg;
+    }
+
+    if (fmt->ret < 0) {
+        pr_err("failed rpc request %d\n", fmt->rpc_id);
+        goto out_free_msg;
+    }
+
+    kmr->conn  = conn;
+    kmr->size  = size;
+    kmr->vaddr = * ((u64 *) (((u64) fmt->payload) + 0UL * sizeof(u64)));
+    kmr->paddr = * ((u64 *) (((u64) fmt->payload) + 1UL * sizeof(u64)));
+    kmr->rkey  = conn->remote_rkey;
+
+    krdma_free_msg(conn, send_msg);
+
+    return kmr;
+
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
+out_free_kmr:
+    kfree(kmr);
+out:
+    return NULL;
+}
+EXPORT_SYMBOL(krdma_alloc_remote_memory);
+
+static int free_remote_memory_rpc_handler(void *input, void *output)
+{
+    int ret = 0;
+    u64 size, vaddr, paddr;
+    struct ib_device *ib_dev = cm_id_server->device;
+
+    size  = *((u64 *) (u64) input + 0UL * sizeof(u64));
+    vaddr = *((u64 *) (u64) input + 1UL * sizeof(u64));
+    paddr = *((u64 *) (u64) input + 2UL * sizeof(u64));
+
+    dma_free_coherent(ib_dev->dma_device, size, (void *) vaddr, paddr);
+
+    return ret;
+}
+
+int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr)
+{
+    int ret;
+    struct krdma_msg *send_msg;
+    struct rpc_msg_fmt *fmt;
+
+    send_msg = krdma_alloc_msg(conn, 4096);
+    if (send_msg == NULL) {
+        pr_err("error on krdma_free_msg\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
+    fmt->rpc_id = KRDMA_RPC_FREE_REMOTE_MEMORY;
+
+    *((u64 *) ((u64) &fmt->payload + 0UL * sizeof(u64))) = kmr->size;
+    *((u64 *) ((u64) &fmt->payload + 1UL * sizeof(u64))) = kmr->vaddr;
+    *((u64 *) ((u64) &fmt->payload + 2UL * sizeof(u64))) = kmr->paddr;
+
+    fmt->size = 3UL * sizeof(u64);
+
+    ret = krdma_send_rpc_request(conn, send_msg);
+    if (ret) {
+        pr_err("error on krdma_send_rpc_request\n");
+        goto out_free_msg;
+    }
+
+    if (fmt->ret < 0) {
+        pr_err("failed rpc request %d\n", fmt->rpc_id);
+        ret = -EINVAL;
+        goto out_free_msg;
+    }
+
+    krdma_free_msg(conn, send_msg);
+
+    return 0;
+
+out_free_msg:
+    krdma_free_msg(conn, send_msg);
+out:
+    return ret;
+}
+EXPORT_SYMBOL(krdma_free_remote_memory);
+
+int register_all_krdma_rpc(void)
+{
+    DEBUG_LOG("register_all_krdma_rpc\n");
+
+    krdma_register_rpc(KRDMA_RPC_DUMMY, dummy_rpc_handler);
+    krdma_register_rpc(KRDMA_RPC_GET_NODE_NAME, get_node_name_rpc_handler);
+    krdma_register_rpc(KRDMA_RPC_ALLOC_REMOTE_MEMORY,
+                       alloc_remote_memory_rpc_handler);
+    krdma_register_rpc(KRDMA_RPC_FREE_REMOTE_MEMORY,
+                       free_remote_memory_rpc_handler);
+    return 0;
+}
+
+void unregister_all_krdma_rpc(void)
+{
+    DEBUG_LOG("unregister_all_krdma_rpc\n");
+
+    krdma_unregister_rpc(KRDMA_RPC_DUMMY);
+    krdma_unregister_rpc(KRDMA_RPC_GET_NODE_NAME);
+    krdma_unregister_rpc(KRDMA_RPC_ALLOC_REMOTE_MEMORY);
+    krdma_unregister_rpc(KRDMA_RPC_FREE_REMOTE_MEMORY);
 }

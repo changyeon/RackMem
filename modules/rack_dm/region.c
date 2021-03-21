@@ -410,6 +410,7 @@ void rack_dm_free_region(struct rack_dm_region *region)
         }
         if (rpage->kmr) {
             free_remote_page(rpage->kmr);
+            rpage->kmr = NULL;
             count_event(region, RACK_DM_EVENT_FREE_REMOTE_PAGE);
         }
     }

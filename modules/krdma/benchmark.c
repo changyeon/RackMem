@@ -30,7 +30,7 @@ static int rpc_task(void *data)
     for (i = 0; i < n; i++) {
         if ((i % 100) == 0)
             pr_info("rpc_task/%d count: %d\n", task_context->id, i);
-        krdma_dummy_rpc(conn);
+        krdma_dummy_rpc(conn, i);
     }
 
     complete(&task_context->done);

@@ -76,6 +76,7 @@ struct krdma_conn {
     struct ib_pd *pd;
     u32 lkey;
     u32 rkey;
+    u32 remote_rkey;
 
     /* message buffers */
     struct krdma_msg *send_msg;
@@ -116,57 +117,30 @@ int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t addr, u64
 /*
  * RPC related
  */
-#define KRDMA_MSG_BUF_SIZE          4096
-#define KRDMA_RECV_WR_POOL_SIZE     256
-#define KRDMA_SEND_WR_POOL_SIZE     16
+#define KRDMA_MSG_BUF_SIZE              4096
+#define KRDMA_RECV_WR_POOL_SIZE         256
+#define KRDMA_SEND_WR_POOL_SIZE         16
 
 enum krdma_cmd {
-    KRDMA_CMD_HANDSHAKE_RDMA,
-    KRDMA_CMD_HANDSHAKE_RPC_QP,
-    KRDMA_CMD_REQUEST_DUMMY,
-    KRDMA_CMD_RESPONSE_DUMMY,
-    KRDMA_CMD_REQUEST_NODE_NAME,
-    KRDMA_CMD_RESPONSE_NODE_NAME,
-    KRDMA_CMD_REQUEST_ALLOC_REMOTE_MEMORY,
-    KRDMA_CMD_RESPONSE_ALLOC_REMOTE_MEMORY,
-    KRDMA_CMD_REQUEST_FREE_REMOTE_MEMORY,
-    KRDMA_CMD_RESPONSE_FREE_REMOTE_MEMORY,
-    KRDMA_CMD_REQUEST_GENERAL_RPC,
-    KRDMA_CMD_RESPONSE_GENERAL_RPC,
+    KRDMA_CMD_RKEY_REQUEST,
+    KRDMA_CMD_RKEY_RESPONSE,
+    KRDMA_CMD_GENERAL_RPC_REQUEST,
+    KRDMA_CMD_GENERAL_RPC_RESPONSE,
     __NR_KRDMA_CMDS
 };
 
 static const char * const krdma_cmds[] = {
-    [KRDMA_CMD_HANDSHAKE_RDMA]               = "HANDSHAKE_RDMA",
-    [KRDMA_CMD_HANDSHAKE_RPC_QP]             = "HANDSHAKE_RPC_QP",
-    [KRDMA_CMD_REQUEST_DUMMY]                = "REQUEST_DUMMY",
-    [KRDMA_CMD_RESPONSE_DUMMY]               = "RESPONSE_DUMMY",
-    [KRDMA_CMD_REQUEST_NODE_NAME]            = "REQUEST_NODE_NAME",
-    [KRDMA_CMD_RESPONSE_NODE_NAME]           = "RESPONSE_NODE_NAME",
-    [KRDMA_CMD_REQUEST_ALLOC_REMOTE_MEMORY]  = "REQUEST_ALLOC_REMOTE_MEMORY",
-    [KRDMA_CMD_RESPONSE_ALLOC_REMOTE_MEMORY] = "RESPONSE_ALLOC_REMOTE_MEMORY",
-    [KRDMA_CMD_REQUEST_FREE_REMOTE_MEMORY]   = "REQUEST_FREE_REMOTE_MEMORY",
-    [KRDMA_CMD_RESPONSE_FREE_REMOTE_MEMORY]  = "RESPONSE_FREE_REMOTE_MEMORY",
-    [KRDMA_CMD_REQUEST_GENERAL_RPC]          = "REQUEST_GENERAL_RPC",
-    [KRDMA_CMD_RESPONSE_GENERAL_RPC]         = "RESPONSE_GENERAL_RPC"
+    [KRDMA_CMD_RKEY_REQUEST]            = "RKEY_REQUEST",
+    [KRDMA_CMD_RKEY_RESPONSE]           = "RKEY_RESPONSE",
+    [KRDMA_CMD_GENERAL_RPC_REQUEST]     = "GENERAL_RPC_REQUEST",
+    [KRDMA_CMD_GENERAL_RPC_RESPONSE]    = "GENERAL_RPC_RESPONSE"
 };
 
-struct krdma_rpc_fmt {
-    u64 cmd;
-    u64 send_ptr;
-    u64 rpc_id;
-    u64 size;
-    u64 payload;
-};
-
-struct krdma_msg_fmt {
-    u64 cmd;
-    u64 arg1;
-    u64 arg2;
-    u64 arg3;
-    u64 arg4;
-    u64 arg5;
-    u64 arg6;
+enum krdma_rpc {
+    KRDMA_RPC_DUMMY                     = 0xAAAA0000,
+    KRDMA_RPC_GET_NODE_NAME,
+    KRDMA_RPC_ALLOC_REMOTE_MEMORY,
+    KRDMA_RPC_FREE_REMOTE_MEMORY
 };
 
 struct krdma_msg_pool {
@@ -186,6 +160,21 @@ struct krdma_msg {
     struct completion done;
 };
 
+struct qp_msg_fmt {
+    u32 qpn;
+    u32 psn;
+    u32 lid;
+};
+
+struct rpc_msg_fmt {
+    u32 cmd;
+    u32 rpc_id;
+    u64 request_id;
+    s32 ret;
+    u32 size;
+    u64 payload;
+};
+
 struct krdma_rpc_func {
     struct hlist_node hn;
     u32 id;
@@ -194,18 +183,22 @@ struct krdma_rpc_func {
 
 void krdma_free_rpc_table(void);
 int krdma_register_rpc(u32 id, int (*func)(void *, void *));
-void krdma_unregister_rpc(u64 id);
+void krdma_unregister_rpc(u32 id);
 struct krdma_msg_pool *krdma_alloc_msg_pool(struct krdma_conn *conn, int n, u64 size);
 void krdma_free_msg_pool(struct krdma_conn *conn, struct krdma_msg_pool *pool);
 struct krdma_msg *krdma_get_msg(struct krdma_msg_pool *pool);
 void krdma_put_msg(struct krdma_msg_pool *pool, struct krdma_msg *kmsg);
 struct krdma_msg *krdma_alloc_msg(struct krdma_conn *conn, u64 size);
 void krdma_free_msg(struct krdma_conn *conn, struct krdma_msg *kmsg);
+void krdma_poll_work(struct work_struct *ws);
+int krdma_send_rpc_request(struct krdma_conn *conn, struct krdma_msg *msg);
+int krdma_get_remote_rkey(struct krdma_conn *conn);
+int krdma_dummy_rpc(struct krdma_conn *conn, u64 val);
 int krdma_get_node_name(struct krdma_conn *conn, char *dst);
-int krdma_dummy_rpc(struct krdma_conn *conn);
 int krdma_rpc_execute(struct krdma_conn *conn, struct krdma_msg *recv_msg);
 int handle_msg(struct krdma_conn *conn, struct ib_wc *wc);
-void krdma_poll_work(struct work_struct *ws);
+int register_all_krdma_rpc(void);
+void unregister_all_krdma_rpc(void);
 
 /*
  * Performance benchmark

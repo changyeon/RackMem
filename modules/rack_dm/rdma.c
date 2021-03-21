@@ -57,6 +57,7 @@ out:
 void free_remote_page(struct krdma_mr *kmr)
 {
     krdma_free_remote_memory(kmr->conn, kmr);
+    kfree(kmr);
 }
 
 int read_remote_page(struct krdma_mr *kmr, void *dst)

@@ -71,7 +71,7 @@ static int __init rack_dm_init(void)
         goto out_device_destroy;
     }
 
-    ret = register_rack_dm_rpc();
+    ret = rack_dm_register_rpc();
     if (ret) {
         pr_err("failed to register rack_dm rpc calls\n");
         goto out_free_node_list;
@@ -96,7 +96,7 @@ out:
 
 static void __exit rack_dm_exit(void)
 {
-    unregister_rack_dm_rpc();
+    rack_dm_unregister_rpc();
 
     free_rdma_node_list();
 
