@@ -11,18 +11,18 @@
 #include <linux/dma-mapping.h>
 
 static const char * const wc_opcodes[] = {
-    [IB_WC_SEND]               = "SEND",
-    [IB_WC_RDMA_WRITE]         = "RDMA_WRITE",
-    [IB_WC_RDMA_READ]          = "RDMA_READ",
-    [IB_WC_COMP_SWAP]          = "COMP_SWAP",
-    [IB_WC_FETCH_ADD]          = "FETCH_ADD",
-    [IB_WC_LSO]                = "LSO",
-    [IB_WC_LOCAL_INV]          = "LOCAL_INV",
-    [IB_WC_REG_MR]             = "REG_MR",
-    [IB_WC_MASKED_COMP_SWAP]   = "MASKED_COMP_SWAP",
-    [IB_WC_MASKED_FETCH_ADD]   = "MASKED_FETCH_ADD",
-    [IB_WC_RECV]               = "RECV",
-    [IB_WC_RECV_RDMA_WITH_IMM] = "RECV_RDMA_WITH_IMM",
+    [IB_WC_SEND]                    = "SEND",
+    [IB_WC_RDMA_WRITE]              = "RDMA_WRITE",
+    [IB_WC_RDMA_READ]               = "RDMA_READ",
+    [IB_WC_COMP_SWAP]               = "COMP_SWAP",
+    [IB_WC_FETCH_ADD]               = "FETCH_ADD",
+    [IB_WC_LSO]                     = "LSO",
+    [IB_WC_LOCAL_INV]               = "LOCAL_INV",
+    [IB_WC_REG_MR]                  = "REG_MR",
+    [IB_WC_MASKED_COMP_SWAP]        = "MASKED_COMP_SWAP",
+    [IB_WC_MASKED_FETCH_ADD]        = "MASKED_FETCH_ADD",
+    [IB_WC_RECV]                    = "RECV",
+    [IB_WC_RECV_RDMA_WITH_IMM]      = "RECV_RDMA_WITH_IMM",
 };
 
 /*
@@ -178,11 +178,12 @@ struct rpc_msg_fmt {
 struct krdma_rpc_func {
     struct hlist_node hn;
     u32 id;
-    int (*func)(void *, void *);
+    int (*func)(void *, void *, void *);
+    void *ctx;
 };
 
 void krdma_free_rpc_table(void);
-int krdma_register_rpc(u32 id, int (*func)(void *, void *));
+int krdma_register_rpc(u32 id, int (*func)(void *, void *, void *), void *ctx);
 void krdma_unregister_rpc(u32 id);
 struct krdma_msg_pool *krdma_alloc_msg_pool(struct krdma_conn *conn, int n, u64 size);
 void krdma_free_msg_pool(struct krdma_conn *conn, struct krdma_msg_pool *pool);
@@ -214,5 +215,6 @@ int krdma_get_all_nodes(struct krdma_conn *nodes[], int n);
 struct krdma_conn *krdma_get_node(char *nodename);
 struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size);
 int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr);
+int krdma_poll_completion(struct ib_cq *cq, u64 *completion);
 
 #endif /* _INCLUDE_KRDMA_H_ */

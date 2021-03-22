@@ -26,7 +26,7 @@ static int krdma_rpc_execute_function(u32 id, void *input, void *output)
 
     hash_for_each_possible(ht_rpc, curr, hn, id) {
         if (curr->id == id) {
-            ret = curr->func(input, output);
+            ret = curr->func(input, output, curr->ctx);
             break;
         }
     }
@@ -48,7 +48,7 @@ out:
     return ret;
 }
 
-int krdma_register_rpc(u32 id, int (*func)(void *, void *))
+int krdma_register_rpc(u32 id, int (*func)(void *, void *, void *), void *ctx)
 {
     int ret;
     struct krdma_rpc_func *rpc;
@@ -64,6 +64,7 @@ int krdma_register_rpc(u32 id, int (*func)(void *, void *))
 
     rpc->id = id;
     rpc->func = func;
+    rpc->ctx = ctx;
 
     spin_lock(&ht_lock);
     hash_add(ht_rpc, &rpc->hn, rpc->id);
@@ -530,7 +531,6 @@ int krdma_send_rpc_request(struct krdma_conn *conn, struct krdma_msg *msg)
     const struct ib_send_wr *bad_send_wr;
 
     fmt = (struct rpc_msg_fmt *) msg->vaddr;
-    fmt->cmd = KRDMA_CMD_GENERAL_RPC_REQUEST;
     fmt->request_id = (u64) msg;
     fmt->ret = 0;
 
@@ -563,7 +563,6 @@ int krdma_get_remote_rkey(struct krdma_conn *conn)
     int ret;
     struct krdma_msg *send_msg;
     struct rpc_msg_fmt *fmt;
-    const struct ib_send_wr *bad_send_wr;
 
     DEBUG_LOG("krdma_get_remote_rkey\n");
 
@@ -576,23 +575,11 @@ int krdma_get_remote_rkey(struct krdma_conn *conn)
 
     fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
     fmt->cmd = KRDMA_CMD_RKEY_REQUEST;
-    fmt->request_id = (u64) send_msg;
     fmt->size = 0;
 
-    init_completion(&send_msg->done);
-    send_msg->send_wr.wr_id = 0;
-
-    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
+    ret = krdma_send_rpc_request(conn, send_msg);
     if (ret) {
-        pr_err("error on ib_post_send: %d\n", ret);
-        goto out_free_msg;
-    }
-
-    ret = wait_for_completion_timeout(
-            &send_msg->done, msecs_to_jiffies(100) + 1);
-    if (ret == 0) {
-        pr_err("timeout in krdma_get_remote_rkey\n");
-        ret = -ETIMEDOUT;
+        pr_err("error on krdma_send_rpc_request\n");
         goto out_free_msg;
     }
 
@@ -614,7 +601,7 @@ out:
     return ret;
 }
 
-static int dummy_rpc_handler(void *input, void *output)
+static int dummy_rpc_handler(void *input, void *output, void *ctx)
 {
     int ret = 0;
     u64 val;
@@ -641,6 +628,7 @@ int krdma_dummy_rpc(struct krdma_conn *conn, u64 val)
     }
 
     fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
+    fmt->cmd = KRDMA_CMD_GENERAL_RPC_REQUEST;
     fmt->rpc_id = KRDMA_RPC_DUMMY;
 
     fmt->payload = val;
@@ -672,7 +660,7 @@ out:
     return ret;
 }
 
-static int get_node_name_rpc_handler(void *input, void *output)
+static int get_node_name_rpc_handler(void *input, void *output, void *ctx)
 {
     int ret = 0;
 
@@ -700,6 +688,7 @@ int krdma_get_node_name(struct krdma_conn *conn, char *dst)
     }
 
     fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
+    fmt->cmd = KRDMA_CMD_GENERAL_RPC_REQUEST;
     fmt->rpc_id = KRDMA_RPC_GET_NODE_NAME;
     fmt->size = 0;
 
@@ -728,7 +717,7 @@ out:
 }
 EXPORT_SYMBOL(krdma_get_node_name);
 
-static int alloc_remote_memory_rpc_handler(void *input, void *output)
+static int alloc_remote_memory_rpc_handler(void *input, void *output, void *ctx)
 {
     int ret = 0;
     void *vaddr;
@@ -775,6 +764,7 @@ struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size)
     }
 
     fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
+    fmt->cmd = KRDMA_CMD_GENERAL_RPC_REQUEST;
     fmt->rpc_id = KRDMA_RPC_ALLOC_REMOTE_MEMORY;
 
     fmt->payload = size;
@@ -793,8 +783,8 @@ struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size)
 
     kmr->conn  = conn;
     kmr->size  = size;
-    kmr->vaddr = * ((u64 *) (((u64) fmt->payload) + 0UL * sizeof(u64)));
-    kmr->paddr = * ((u64 *) (((u64) fmt->payload) + 1UL * sizeof(u64)));
+    kmr->vaddr = * ((u64 *) (((u64) &fmt->payload) + 0UL * sizeof(u64)));
+    kmr->paddr = * ((u64 *) (((u64) &fmt->payload) + 1UL * sizeof(u64)));
     kmr->rkey  = conn->remote_rkey;
 
     krdma_free_msg(conn, send_msg);
@@ -810,7 +800,7 @@ out:
 }
 EXPORT_SYMBOL(krdma_alloc_remote_memory);
 
-static int free_remote_memory_rpc_handler(void *input, void *output)
+static int free_remote_memory_rpc_handler(void *input, void *output, void *ctx)
 {
     int ret = 0;
     u64 size, vaddr, paddr;
@@ -839,6 +829,7 @@ int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr)
     }
 
     fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
+    fmt->cmd = KRDMA_CMD_GENERAL_RPC_REQUEST;
     fmt->rpc_id = KRDMA_RPC_FREE_REMOTE_MEMORY;
 
     *((u64 *) ((u64) &fmt->payload + 0UL * sizeof(u64))) = kmr->size;
@@ -872,23 +863,61 @@ EXPORT_SYMBOL(krdma_free_remote_memory);
 
 int register_all_krdma_rpc(void)
 {
+    int ret;
+    u32 rpc_id;
+
     DEBUG_LOG("register_all_krdma_rpc\n");
 
-    krdma_register_rpc(KRDMA_RPC_DUMMY, dummy_rpc_handler);
-    krdma_register_rpc(KRDMA_RPC_GET_NODE_NAME, get_node_name_rpc_handler);
-    krdma_register_rpc(KRDMA_RPC_ALLOC_REMOTE_MEMORY,
-                       alloc_remote_memory_rpc_handler);
-    krdma_register_rpc(KRDMA_RPC_FREE_REMOTE_MEMORY,
-                       free_remote_memory_rpc_handler);
+    rpc_id = KRDMA_RPC_DUMMY;
+    ret = krdma_register_rpc(rpc_id, dummy_rpc_handler, NULL);
+    if (ret) {
+        pr_err("failed to register krdma_rpc %d\n", rpc_id);
+        ret = -EINVAL;
+        goto out;
+    }
+
+    rpc_id = KRDMA_RPC_GET_NODE_NAME;
+    krdma_register_rpc(rpc_id, get_node_name_rpc_handler, NULL);
+    if (ret) {
+        pr_err("failed to register krdma_rpc %d\n", rpc_id);
+        ret = -EINVAL;
+        goto out_unregister_dummy;
+    }
+
+    rpc_id = KRDMA_RPC_ALLOC_REMOTE_MEMORY;
+    krdma_register_rpc(rpc_id, alloc_remote_memory_rpc_handler, NULL);
+    if (ret) {
+        pr_err("failed to register krdma_rpc %d\n", rpc_id);
+        ret = -EINVAL;
+        goto out_unregister_get_node_name;
+    }
+
+    rpc_id = KRDMA_RPC_FREE_REMOTE_MEMORY;
+    krdma_register_rpc(rpc_id, free_remote_memory_rpc_handler, NULL);
+    if (ret) {
+        pr_err("failed to register krdma_rpc %d\n", rpc_id);
+        ret = -EINVAL;
+        goto out_unregister_alloc_remote_memory;
+    }
+
     return 0;
+
+out_unregister_alloc_remote_memory:
+    krdma_unregister_rpc(KRDMA_RPC_ALLOC_REMOTE_MEMORY);
+out_unregister_get_node_name:
+    krdma_unregister_rpc(KRDMA_RPC_GET_NODE_NAME);
+out_unregister_dummy:
+    krdma_unregister_rpc(KRDMA_RPC_DUMMY);
+out:
+    return ret;
 }
 
 void unregister_all_krdma_rpc(void)
 {
     DEBUG_LOG("unregister_all_krdma_rpc\n");
 
-    krdma_unregister_rpc(KRDMA_RPC_DUMMY);
-    krdma_unregister_rpc(KRDMA_RPC_GET_NODE_NAME);
-    krdma_unregister_rpc(KRDMA_RPC_ALLOC_REMOTE_MEMORY);
     krdma_unregister_rpc(KRDMA_RPC_FREE_REMOTE_MEMORY);
+    krdma_unregister_rpc(KRDMA_RPC_ALLOC_REMOTE_MEMORY);
+    krdma_unregister_rpc(KRDMA_RPC_GET_NODE_NAME);
+    krdma_unregister_rpc(KRDMA_RPC_DUMMY);
 }

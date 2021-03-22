@@ -99,6 +99,7 @@ int krdma_poll_completion(struct ib_cq *cq, u64 *completion)
 err:
     return ret;
 }
+EXPORT_SYMBOL(krdma_poll_completion);
 
 int krdma_poll_cq_one(struct ib_cq *cq)
 {
@@ -167,7 +168,6 @@ int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t addr,
     return 0;
 
 out:
-
     return ret;
 }
 EXPORT_SYMBOL(krdma_io);

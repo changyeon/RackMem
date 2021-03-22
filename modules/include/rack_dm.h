@@ -66,21 +66,24 @@ enum rack_dm_page_state {
 };
 
 struct rack_dm_page_list {
-    struct list_head head;
     int size;
+    struct list_head head;
     spinlock_t lock;
+};
+
+struct remote_page {
+    struct krdma_conn *conn;
+    u64 remote_paddr;
+    u64 remote_vaddr;
+    struct list_head head;
 };
 
 struct rack_dm_page {
     int flags;
-    struct list_head head;
     u64 index;
     void *buf;
-    struct krdma_mr *kmr;
-
-    u64 remote_paddr;
-    u64 remote_vaddr;
-
+    struct remote_page *remote_page;
+    struct list_head head;
     spinlock_t lock;
 };
 
@@ -120,18 +123,14 @@ struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size);
 void rack_dm_free_region(struct rack_dm_region *region);
 
 /* remote memory */
-int alloc_remote_page(u64 size, struct krdma_mr **kmr);
-void free_remote_page(struct krdma_mr *kmr);
-int read_remote_page(struct krdma_mr *kmr, void *dst);
-int write_remote_page(struct krdma_mr *kmr, void *src);
+int alloc_remote_page(struct rack_dm_page *rpage, u64 page_size);
+int free_remote_page(struct rack_dm_page *rpage);
 int update_rdma_node_list(void);
 void free_rdma_node_list(void);
 
 /* rpc */
-int rack_dm_update_node_list(void);
-void rack_dm_destroy_node_list(void);
-int rack_dm_register_rpc(void);
-void rack_dm_unregister_rpc(void);
+int rack_dm_setup_rpc(void);
+void rack_dm_cleanup_rpc(void);
 int get_region_metadata(struct krdma_conn *conn, u64 region_id);
 
 #endif /* _INCLUDE_RACK_DM_H_ */

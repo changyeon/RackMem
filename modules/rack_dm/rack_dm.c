@@ -65,24 +65,16 @@ static int __init rack_dm_init(void)
     }
     rack_dm_device_data.device = rack_dm_device;
 
-    ret = update_rdma_node_list();
-    if (ret) {
-        pr_err("error on update_rdma_node_list\n");
-        goto out_device_destroy;
-    }
-
-    ret = rack_dm_register_rpc();
+    ret = rack_dm_setup_rpc();
     if (ret) {
         pr_err("failed to register rack_dm rpc calls\n");
-        goto out_free_node_list;
+        goto out_device_destroy;
     }
 
     pr_info("module loaded\n");
 
     return 0;
 
-out_free_node_list:
-    free_rdma_node_list();
 out_device_destroy:
     device_destroy(rack_dm_device_data.class,
                    MKDEV(rack_dm_device_data.major_number, 0));
@@ -96,10 +88,7 @@ out:
 
 static void __exit rack_dm_exit(void)
 {
-    rack_dm_unregister_rpc();
-
-    free_rdma_node_list();
-
+    rack_dm_cleanup_rpc();
     device_destroy(rack_dm_device_data.class,
                    MKDEV(rack_dm_device_data.major_number, 0));
     class_destroy(rack_dm_device_data.class);

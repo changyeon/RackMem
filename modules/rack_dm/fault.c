@@ -60,7 +60,6 @@ void rack_dm_close(struct vm_area_struct *vma)
     region = (struct rack_dm_region *) vma->vm_private_data;
     rack_dm_free_region(region);
     vma->vm_private_data = NULL;
-
 }
 
 vm_fault_t rack_dm_fault(struct vm_fault *vmf)
