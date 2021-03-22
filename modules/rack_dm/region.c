@@ -96,23 +96,23 @@ out:
     return ret;
 }
 
-static int read_remote_page(struct rack_dm_page *rpage)
+static int read_remote_page(struct krdma_conn *conn, void *buf, u64 size,
+                            u64 remote_paddr)
 {
     int ret = 0;
     u64 completion;
     struct ib_rdma_wr wr;
     struct ib_sge sgl;
     const struct ib_send_wr *bad_send_wr = NULL;
-    struct krdma_conn *conn = rpage->remote_page->conn;
 
     memset(&wr, 0, sizeof(wr));
     memset(&sgl, 0, sizeof(sgl));
 
-    sgl.addr = (u64) page_to_phys(vmalloc_to_page(rpage->buf));
+    sgl.addr = (u64) page_to_phys(vmalloc_to_page(buf));
     sgl.lkey = conn->lkey;
-    sgl.length = 4096UL;
+    sgl.length = size;
 
-    wr.remote_addr = rpage->remote_page->remote_paddr;
+    wr.remote_addr = remote_paddr;
     wr.rkey = conn->remote_rkey;
 
     wr.wr.next = NULL;
@@ -141,23 +141,23 @@ out:
     return ret;
 }
 
-static int write_remote_page(struct rack_dm_page *rpage)
+static int write_remote_page(struct krdma_conn *conn, void *buf, u64 size,
+                             u64 remote_paddr)
 {
     int ret = 0;
     u64 completion;
     struct ib_rdma_wr wr;
     struct ib_sge sgl;
     const struct ib_send_wr *bad_send_wr = NULL;
-    struct krdma_conn *conn = rpage->remote_page->conn;
 
     memset(&wr, 0, sizeof(wr));
     memset(&sgl, 0, sizeof(sgl));
 
-    sgl.addr = (u64) page_to_phys(vmalloc_to_page(rpage->buf));
+    sgl.addr = (u64) page_to_phys(vmalloc_to_page(buf));
     sgl.lkey = conn->lkey;
-    sgl.length = 4096UL;
+    sgl.length = size;
 
-    wr.remote_addr = rpage->remote_page->remote_paddr;
+    wr.remote_addr = remote_paddr;
     wr.rkey = conn->remote_rkey;
 
     wr.wr.next = NULL;
@@ -199,7 +199,9 @@ int rack_dm_restore(struct rack_dm_region *region, struct rack_dm_page *rpage)
         goto out;
     }
 
-    ret = read_remote_page(rpage);
+    ret = read_remote_page(
+            rpage->remote_page->conn, rpage->buf, region->page_size,
+            rpage->remote_page->remote_paddr);
     if (ret) {
         pr_err("error on read_remote_page\n");
         goto out;
@@ -236,7 +238,9 @@ int rack_dm_writeback(struct rack_dm_region *region,
         goto out;
     }
 
-    ret = write_remote_page(rpage);
+    ret = write_remote_page(
+            rpage->remote_page->conn, rpage->buf, region->page_size,
+            rpage->remote_page->remote_paddr);
     if (ret) {
         pr_err("error on write_remote_page\n");
         goto out;
@@ -506,7 +510,12 @@ void rack_dm_free_region(struct rack_dm_region *region)
             count_event(region, RACK_DM_EVENT_FREE_LOCAL_PAGE);
         }
         if (rpage->remote_page) {
-            ret = free_remote_page(rpage);
+            ret = free_remote_page(
+                    rpage->remote_page->conn, region->page_size,
+                    rpage->remote_page->remote_vaddr,
+                    rpage->remote_page->remote_paddr);
+            kfree(rpage->remote_page);
+            rpage->remote_page = NULL;
             if (ret) {
                 pr_err("error on free_remote_page %llu\n", i);
                 break;

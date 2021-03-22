@@ -104,18 +104,18 @@ static int alloc_remote_page_rpc_handler(void *input, void *output, void *ctx)
     payload = (struct payload_fmt *) input;
     size = payload->arg1;
 
-    buf = dma_alloc_coherent(ib_dev->dma_device, size, &paddr, GFP_KERNEL);
+    buf = vmalloc_user(size);
     if (buf == NULL) {
         pr_err("failed to allocate memory for remote_page buf\n");
-        ret = -ENOMEM;
         goto out;
     }
 
     vaddr = (u64) buf;
+    paddr = ib_dma_map_page(
+            ib_dev, vmalloc_to_page(buf), 0, size, DMA_BIDIRECTIONAL);
 
-    DEBUG_LOG("alloc_remote_page_rpc_handler vaddr: %llu, paddr: %llu "
-              "paddr: %llu, (%p)\n",
-              vaddr, paddr, (u64) page_to_phys(vmalloc_to_page(buf)), ib_dev);
+    DEBUG_LOG("alloc_remote_page_rpc_handler vaddr: %llu, paddr: %llu (%p)\n",
+              vaddr, paddr, ib_dev);
 
     payload = (struct payload_fmt *) output;
     payload->arg1 = vaddr;
@@ -182,6 +182,8 @@ int alloc_remote_page(struct rack_dm_page *rpage, u64 page_size)
 
     rpage->remote_page = remote_page;
 
+    krdma_free_msg(node->conn, send_msg);
+
     return 0;
 
 out_free_msg:
@@ -207,15 +209,16 @@ static int free_remote_page_rpc_handler(void *input, void *output, void *ctx)
     DEBUG_LOG("free_remote_page_rpc_handler size: %llu, vaddr: %llu, "
               "paddr: %llu (%p)\n", size, vaddr, paddr, (void *) ib_dev);
 
-    dma_free_coherent(ib_dev->dma_device, size, (void *) vaddr, paddr);
+    ib_dma_unmap_page(ib_dev, paddr, size, DMA_BIDIRECTIONAL);
+    vfree((void *) vaddr);
 
     return ret;
 }
 
-int free_remote_page(struct rack_dm_page *rpage)
+int free_remote_page(struct krdma_conn *conn, u64 size, u64 remote_vaddr,
+                     u64 remote_paddr)
 {
     int ret;
-    struct krdma_conn *conn = rpage->remote_page->conn;
     struct krdma_msg *send_msg;
     struct rpc_msg_fmt *fmt;
     struct payload_fmt *payload;
@@ -232,9 +235,9 @@ int free_remote_page(struct rack_dm_page *rpage)
     fmt->rpc_id = RACK_DM_RPC_FREE_REMOTE_PAGE;
 
     payload = (struct payload_fmt *) &fmt->payload;
-    payload->arg1 = 4096UL;
-    payload->arg2 = rpage->remote_page->remote_vaddr;
-    payload->arg3 = rpage->remote_page->remote_paddr;
+    payload->arg1 = size;
+    payload->arg2 = remote_vaddr;
+    payload->arg3 = remote_paddr;
     fmt->size = 3UL * sizeof(u64);
 
     DEBUG_LOG("free_remote_page size: %llu, vaddr: %llu, paddr: %llu\n",
@@ -251,8 +254,7 @@ int free_remote_page(struct rack_dm_page *rpage)
         goto out_free_msg;
     }
 
-    kfree(rpage->remote_page);
-    rpage->remote_page = NULL;
+    krdma_free_msg(conn, send_msg);
 
     return 0;
 
@@ -262,16 +264,40 @@ out:
     return ret;
 }
 
+#define MB 1048576
+#define GB 1073741824
+
 static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
 {
-    u64 *ptr;
+    int ret = 0;
+    struct payload_fmt *payload;
+    struct rack_dm_region *region;
+    struct ib_device *ib_dev = (struct ib_device *) ctx;
+    void *buf;
+    u64 size, paddr;
 
-    ptr = (u64 *) input;
-    pr_info("metadata_rpc_handler: region_id: %llu\n", *ptr);
-    ptr = (u64 *) output;
-    *ptr = 22419;
+    payload = (struct payload_fmt *) input;
+    region = (struct rack_dm_region *) payload->arg1;
 
-    return 0;
+    size = MB;
+    buf = dma_alloc_coherent(ib_dev->dma_device, size, &paddr, GFP_KERNEL);
+    if (buf == NULL) {
+        pr_err("failed to allocate memory for region metadata buffer\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    payload = (struct payload_fmt *) output;
+    payload->arg1 = (u64) buf;
+    payload->arg2 = paddr;
+    payload->arg3 = size;
+
+    ret = 3UL * sizeof(u64);
+
+    return ret;
+
+out:
+    return ret;
 }
 
 int get_region_metadata(struct krdma_conn *conn, u64 region_id)
@@ -279,19 +305,22 @@ int get_region_metadata(struct krdma_conn *conn, u64 region_id)
     int ret;
     struct krdma_msg *send_msg;
     struct rpc_msg_fmt *fmt;
+    struct payload_fmt *payload;
 
     send_msg = krdma_alloc_msg(conn, 4096);
     if (send_msg == NULL) {
         pr_err("error on krdma_alloc_msg\n");
-        ret = -ENOMEM;
+        ret = -EINVAL;
         goto out;
     }
 
     fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
-    fmt->rpc_id = (u64) RACK_DM_RPC_GET_REGION_METADATA;
+    fmt->cmd = KRDMA_CMD_GENERAL_RPC_REQUEST;
+    fmt->rpc_id = RACK_DM_RPC_GET_REGION_METADATA;
 
+    payload = (struct payload_fmt *) &fmt->payload;
+    payload->arg1 = region_id;
     fmt->size = sizeof(u64);
-    fmt->payload = (u64) region_id;
 
     ret = krdma_send_rpc_request(conn, send_msg);
     if (ret) {
@@ -301,11 +330,10 @@ int get_region_metadata(struct krdma_conn *conn, u64 region_id)
 
     if (fmt->ret < 0) {
         pr_err("failed rpc request %d\n", fmt->rpc_id);
-        ret = -EINVAL;
         goto out_free_msg;
     }
 
-    pr_info("get_region_metadata received msg: %llu\n", fmt->payload);
+    /* TODO: RDMA read from the remote region */
 
     krdma_free_msg(conn, send_msg);
 

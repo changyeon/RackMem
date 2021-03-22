@@ -124,7 +124,7 @@ void rack_dm_free_region(struct rack_dm_region *region);
 
 /* remote memory */
 int alloc_remote_page(struct rack_dm_page *rpage, u64 page_size);
-int free_remote_page(struct rack_dm_page *rpage);
+int free_remote_page(struct krdma_conn *conn, u64 size, u64 remote_vaddr, u64 remote_paddr);
 int update_rdma_node_list(void);
 void free_rdma_node_list(void);
 
