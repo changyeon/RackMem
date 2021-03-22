@@ -175,6 +175,15 @@ struct rpc_msg_fmt {
     u64 payload;
 };
 
+struct payload_fmt {
+    u64 arg1;
+    u64 arg2;
+    u64 arg3;
+    u64 arg4;
+    u64 arg5;
+    u64 arg6;
+};
+
 struct krdma_rpc_func {
     struct hlist_node hn;
     u32 id;

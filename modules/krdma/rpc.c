@@ -723,6 +723,7 @@ static int alloc_remote_memory_rpc_handler(void *input, void *output, void *ctx)
     void *vaddr;
     u64 size, paddr;
     struct ib_device *ib_dev = cm_id_server->device;
+    struct payload_fmt *payload;
 
     size = *((u64 *) input);
 
@@ -733,8 +734,9 @@ static int alloc_remote_memory_rpc_handler(void *input, void *output, void *ctx)
         goto out;
     }
 
-    *((u64 *) ((u64) output + 0UL * sizeof(u64))) = (u64) vaddr;
-    *((u64 *) ((u64) output + 1UL * sizeof(u64))) = (u64) paddr;
+    payload = (struct payload_fmt *) output;
+    payload->arg1 = (u64) vaddr;
+    payload->arg2 = (u64) paddr;
 
     ret = 2UL * sizeof(u64);
 
@@ -750,6 +752,7 @@ struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size)
     struct krdma_mr *kmr = NULL;
     struct krdma_msg *send_msg;
     struct rpc_msg_fmt *fmt;
+    struct payload_fmt *payload;
 
     kmr = kzalloc(sizeof(*kmr), GFP_KERNEL);
     if (kmr == NULL) {
@@ -781,10 +784,12 @@ struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size)
         goto out_free_msg;
     }
 
+    payload = (struct payload_fmt *) &fmt->payload;
+
     kmr->conn  = conn;
     kmr->size  = size;
-    kmr->vaddr = * ((u64 *) (((u64) &fmt->payload) + 0UL * sizeof(u64)));
-    kmr->paddr = * ((u64 *) (((u64) &fmt->payload) + 1UL * sizeof(u64)));
+    kmr->vaddr = payload->arg1;
+    kmr->paddr = payload->arg2;
     kmr->rkey  = conn->remote_rkey;
 
     krdma_free_msg(conn, send_msg);
@@ -805,10 +810,12 @@ static int free_remote_memory_rpc_handler(void *input, void *output, void *ctx)
     int ret = 0;
     u64 size, vaddr, paddr;
     struct ib_device *ib_dev = cm_id_server->device;
+    struct payload_fmt *payload;
 
-    size  = *((u64 *) (u64) input + 0UL * sizeof(u64));
-    vaddr = *((u64 *) (u64) input + 1UL * sizeof(u64));
-    paddr = *((u64 *) (u64) input + 2UL * sizeof(u64));
+    payload = (struct payload_fmt *) input;
+    size  = payload->arg1;
+    vaddr = payload->arg2;
+    paddr = payload->arg3;
 
     dma_free_coherent(ib_dev->dma_device, size, (void *) vaddr, paddr);
 
@@ -820,6 +827,7 @@ int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr)
     int ret;
     struct krdma_msg *send_msg;
     struct rpc_msg_fmt *fmt;
+    struct payload_fmt *payload;
 
     send_msg = krdma_alloc_msg(conn, 4096);
     if (send_msg == NULL) {
@@ -832,9 +840,10 @@ int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr)
     fmt->cmd = KRDMA_CMD_GENERAL_RPC_REQUEST;
     fmt->rpc_id = KRDMA_RPC_FREE_REMOTE_MEMORY;
 
-    *((u64 *) ((u64) &fmt->payload + 0UL * sizeof(u64))) = kmr->size;
-    *((u64 *) ((u64) &fmt->payload + 1UL * sizeof(u64))) = kmr->vaddr;
-    *((u64 *) ((u64) &fmt->payload + 2UL * sizeof(u64))) = kmr->paddr;
+    payload = (struct payload_fmt *) &fmt->payload;
+    payload->arg1 = kmr->size;
+    payload->arg2 = kmr->vaddr;
+    payload->arg3 = kmr->paddr;
 
     fmt->size = 3UL * sizeof(u64);
 

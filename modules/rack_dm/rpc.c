@@ -99,8 +99,10 @@ static int alloc_remote_page_rpc_handler(void *input, void *output, void *ctx)
     void *buf;
     u64 size, vaddr, paddr;
     struct ib_device *ib_dev = (struct ib_device *) ctx;
+    struct payload_fmt *payload;
 
-    size = *((u64 *) input);
+    payload = (struct payload_fmt *) input;
+    size = payload->arg1;
 
     buf = dma_alloc_coherent(ib_dev->dma_device, size, &paddr, GFP_KERNEL);
     if (buf == NULL) {
@@ -115,8 +117,9 @@ static int alloc_remote_page_rpc_handler(void *input, void *output, void *ctx)
               "paddr: %llu, (%p)\n",
               vaddr, paddr, (u64) page_to_phys(vmalloc_to_page(buf)), ib_dev);
 
-    *((u64 *) ((u64) output + 0UL * sizeof(u64))) = (u64) vaddr;
-    *((u64 *) ((u64) output + 1UL * sizeof(u64))) = (u64) paddr;
+    payload = (struct payload_fmt *) output;
+    payload->arg1 = vaddr;
+    payload->arg2 = paddr;
 
     ret = 2UL * sizeof(u64);
 
@@ -131,7 +134,7 @@ int alloc_remote_page(struct rack_dm_page *rpage, u64 page_size)
     struct rack_dm_node *node;
     struct krdma_msg *send_msg;
     struct rpc_msg_fmt *fmt;
-    u64 ptr;
+    struct payload_fmt *payload;
 
     remote_page = kzalloc(sizeof(*remote_page), GFP_KERNEL);
     if (remote_page == NULL) {
@@ -172,14 +175,14 @@ int alloc_remote_page(struct rack_dm_page *rpage, u64 page_size)
         goto out_free_msg;
     }
 
-   ptr = (u64) &fmt->payload;
-   remote_page->conn = node->conn;
-   remote_page->remote_vaddr = *((u64 *) (ptr + 0UL * sizeof(u64)));
-   remote_page->remote_paddr = *((u64 *) (ptr + 1UL * sizeof(u64)));
+    payload = (struct payload_fmt *) &fmt->payload;
+    remote_page->conn = node->conn;
+    remote_page->remote_vaddr = payload->arg1;
+    remote_page->remote_paddr = payload->arg2;
 
-   rpage->remote_page = remote_page;
+    rpage->remote_page = remote_page;
 
-   return 0;
+    return 0;
 
 out_free_msg:
     krdma_free_msg(node->conn, send_msg);
@@ -194,12 +197,16 @@ static int free_remote_page_rpc_handler(void *input, void *output, void *ctx)
     int ret = 0;
     u64 size, vaddr, paddr;
     struct ib_device *ib_dev = (struct ib_device *) ctx;
+    struct payload_fmt *payload;
 
-    size  = *((u64 *) ((u64) input + 0UL * sizeof(u64)));
-    vaddr = *((u64 *) ((u64) input + 1UL * sizeof(u64)));
-    paddr = *((u64 *) ((u64) input + 2UL * sizeof(u64)));
+    payload = (struct payload_fmt *) input;
+    size  = payload->arg1;
+    vaddr = payload->arg2;
+    paddr = payload->arg3;
 
-    DEBUG_LOG("free_remote_page_rpc_handler vaddr: %llu %p\n", vaddr, ib_dev);
+    DEBUG_LOG("free_remote_page_rpc_handler size: %llu, vaddr: %llu, "
+              "paddr: %llu (%p)\n", size, vaddr, paddr, (void *) ib_dev);
+
     dma_free_coherent(ib_dev->dma_device, size, (void *) vaddr, paddr);
 
     return ret;
@@ -211,7 +218,7 @@ int free_remote_page(struct rack_dm_page *rpage)
     struct krdma_conn *conn = rpage->remote_page->conn;
     struct krdma_msg *send_msg;
     struct rpc_msg_fmt *fmt;
-    u64 ptr;
+    struct payload_fmt *payload;
 
     send_msg = krdma_alloc_msg(conn, 4096);
     if (send_msg == NULL) {
@@ -224,11 +231,14 @@ int free_remote_page(struct rack_dm_page *rpage)
     fmt->cmd = KRDMA_CMD_GENERAL_RPC_REQUEST;
     fmt->rpc_id = RACK_DM_RPC_FREE_REMOTE_PAGE;
 
-    ptr = (u64) &fmt->payload;
-    *((u64 *) ptr + 0UL * sizeof(u64)) = 4096UL;
-    *((u64 *) ptr + 1UL * sizeof(u64)) = rpage->remote_page->remote_vaddr;
-    *((u64 *) ptr + 2UL * sizeof(u64)) = rpage->remote_page->remote_paddr;
+    payload = (struct payload_fmt *) &fmt->payload;
+    payload->arg1 = 4096UL;
+    payload->arg2 = rpage->remote_page->remote_vaddr;
+    payload->arg3 = rpage->remote_page->remote_paddr;
     fmt->size = 3UL * sizeof(u64);
+
+    DEBUG_LOG("free_remote_page size: %llu, vaddr: %llu, paddr: %llu\n",
+              payload->arg1, payload->arg2, payload->arg3);
 
     ret = krdma_send_rpc_request(conn, send_msg);
     if (ret) {
