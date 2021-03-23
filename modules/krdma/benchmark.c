@@ -5,7 +5,6 @@
 #include <linux/delay.h>
 #include <linux/completion.h>
 #include <krdma.h>
-/*#include <linux/cpumask.h>*/
 
 extern int g_debug;
 

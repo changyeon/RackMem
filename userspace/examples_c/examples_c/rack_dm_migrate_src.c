@@ -79,6 +79,12 @@ static int migrate_src(char *server, int port)
         goto out_close_region;
     }
 
+    ret = rack_dm_set_persistent(region, 1);
+    if (ret) {
+        perror("error on rack_dm_set_persistent");
+        goto out_close_region;
+    }
+
     close(fd);
 
     return 0;

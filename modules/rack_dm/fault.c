@@ -58,7 +58,8 @@ void rack_dm_close(struct vm_area_struct *vma)
     DEBUG_LOG("rack_dm_close vma: %p\n", vma);
 
     region = (struct rack_dm_region *) vma->vm_private_data;
-    rack_dm_free_region(region);
+    if (!region->persistent)
+        rack_dm_free_region(region);
     vma->vm_private_data = NULL;
 }
 

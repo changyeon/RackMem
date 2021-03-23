@@ -96,8 +96,8 @@ out:
     return ret;
 }
 
-static int read_remote_page(struct krdma_conn *conn, void *buf, u64 size,
-                            u64 remote_paddr)
+int rack_dm_rdma(struct krdma_conn *conn, u64 local_dma_addr,
+                 u64 remote_dma_addr, u64 size, int dir)
 {
     int ret = 0;
     u64 completion;
@@ -108,63 +108,18 @@ static int read_remote_page(struct krdma_conn *conn, void *buf, u64 size,
     memset(&wr, 0, sizeof(wr));
     memset(&sgl, 0, sizeof(sgl));
 
-    sgl.addr = (u64) page_to_phys(vmalloc_to_page(buf));
+    sgl.addr = local_dma_addr;
     sgl.lkey = conn->lkey;
     sgl.length = size;
 
-    wr.remote_addr = remote_paddr;
+    wr.remote_addr = remote_dma_addr;
     wr.rkey = conn->remote_rkey;
 
     wr.wr.next = NULL;
     wr.wr.wr_id = (u64) &completion;
     wr.wr.sg_list = &sgl;
     wr.wr.num_sge = 1;
-    wr.wr.opcode = IB_WR_RDMA_READ;
-    wr.wr.send_flags = IB_SEND_SIGNALED;
-
-    completion = 0;
-    ret = ib_post_send(conn->rdma_qp.qp, &wr.wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send\n");
-        goto out;
-    }
-
-    ret = krdma_poll_completion(conn->rdma_qp.cq, &completion);
-    if (ret) {
-        pr_err("error on krdma_poll_cq\n");
-        goto out;
-    }
-
-    return 0;
-
-out:
-    return ret;
-}
-
-static int write_remote_page(struct krdma_conn *conn, void *buf, u64 size,
-                             u64 remote_paddr)
-{
-    int ret = 0;
-    u64 completion;
-    struct ib_rdma_wr wr;
-    struct ib_sge sgl;
-    const struct ib_send_wr *bad_send_wr = NULL;
-
-    memset(&wr, 0, sizeof(wr));
-    memset(&sgl, 0, sizeof(sgl));
-
-    sgl.addr = (u64) page_to_phys(vmalloc_to_page(buf));
-    sgl.lkey = conn->lkey;
-    sgl.length = size;
-
-    wr.remote_addr = remote_paddr;
-    wr.rkey = conn->remote_rkey;
-
-    wr.wr.next = NULL;
-    wr.wr.wr_id = (u64) &completion;
-    wr.wr.sg_list = &sgl;
-    wr.wr.num_sge = 1;
-    wr.wr.opcode = IB_WR_RDMA_WRITE;
+    wr.wr.opcode = dir == WRITE ? IB_WR_RDMA_WRITE : IB_WR_RDMA_READ;
     wr.wr.send_flags = IB_SEND_SIGNALED;
 
     completion = 0;
@@ -189,6 +144,7 @@ out:
 int rack_dm_restore(struct rack_dm_region *region, struct rack_dm_page *rpage)
 {
     int ret;
+    u64 local_dma_addr;
 
     DEBUG_LOG("rack_dm_restore region: %p, pg_index: %llu\n", region,
               rpage->index);
@@ -199,13 +155,22 @@ int rack_dm_restore(struct rack_dm_region *region, struct rack_dm_page *rpage)
         goto out;
     }
 
-    ret = read_remote_page(
-            rpage->remote_page->conn, rpage->buf, region->page_size,
-            rpage->remote_page->remote_paddr);
+    local_dma_addr = ib_dma_map_page(
+            rpage->remote_page->conn->cm_id->device,
+            vmalloc_to_page(rpage->buf), 0, region->page_size,
+            DMA_BIDIRECTIONAL);
+
+    ret = rack_dm_rdma(
+            rpage->remote_page->conn, local_dma_addr,
+            rpage->remote_page->remote_paddr, region->page_size, READ);
     if (ret) {
         pr_err("error on read_remote_page\n");
         goto out;
     }
+
+    ib_dma_unmap_page(
+            rpage->remote_page->conn->cm_id->device,
+            local_dma_addr, region->page_size, DMA_BIDIRECTIONAL);
 
     count_event(region, RACK_DM_EVENT_RDMA_READ);
 
@@ -219,12 +184,13 @@ int rack_dm_writeback(struct rack_dm_region *region,
                       struct rack_dm_page *rpage)
 {
     int ret;
+    u64 local_dma_addr;
 
     DEBUG_LOG("rack_dm_writeback region: %p, pg_index: %llu\n", region,
               rpage->index);
 
     if (rpage->remote_page == NULL) {
-        ret = alloc_remote_page(rpage, region->page_size);
+        ret = alloc_remote_user_page(rpage, region->page_size);
         if (ret) {
             pr_err("error on alloc_remote_page\n");
             goto out;
@@ -238,13 +204,22 @@ int rack_dm_writeback(struct rack_dm_region *region,
         goto out;
     }
 
-    ret = write_remote_page(
-            rpage->remote_page->conn, rpage->buf, region->page_size,
-            rpage->remote_page->remote_paddr);
+    local_dma_addr = ib_dma_map_page(
+            rpage->remote_page->conn->cm_id->device,
+            vmalloc_to_page(rpage->buf), 0, region->page_size,
+            DMA_BIDIRECTIONAL);
+
+    ret = rack_dm_rdma(
+            rpage->remote_page->conn, local_dma_addr,
+            rpage->remote_page->remote_paddr, region->page_size, WRITE);
     if (ret) {
         pr_err("error on write_remote_page\n");
         goto out;
     }
+
+    ib_dma_unmap_page(
+            rpage->remote_page->conn->cm_id->device,
+            local_dma_addr, region->page_size, DMA_BIDIRECTIONAL);
 
     count_event(region, RACK_DM_EVENT_RDMA_WRITE);
 
@@ -377,7 +352,7 @@ static int write_region_id(struct rack_dm_region *region)
     }
 
     *((u64 *) rpage->buf) = region->id;
-    krdma_node_name((char *) ((u64) rpage->buf + sizeof(u64)));
+    krdma_local_node_name((char *) ((u64) rpage->buf + sizeof(u64)));
 
     DEBUG_LOG("write_region_id id: %llu, node_name: %s\n",
               *((u64 *) rpage->buf),
@@ -510,18 +485,37 @@ void rack_dm_free_region(struct rack_dm_region *region)
             count_event(region, RACK_DM_EVENT_FREE_LOCAL_PAGE);
         }
         if (rpage->remote_page) {
-            ret = free_remote_page(
+            ret = free_remote_user_page(
                     rpage->remote_page->conn, region->page_size,
                     rpage->remote_page->remote_vaddr,
                     rpage->remote_page->remote_paddr);
-            kfree(rpage->remote_page);
-            rpage->remote_page = NULL;
             if (ret) {
                 pr_err("error on free_remote_page %llu\n", i);
                 break;
             }
+            kfree(rpage->remote_page);
+            rpage->remote_page = NULL;
             count_event(region, RACK_DM_EVENT_FREE_REMOTE_PAGE);
         }
+    }
+
+    rack_dm_print_statistics(region);
+    free_percpu(region->stat);
+    vfree(region->pages);
+    kfree(region);
+};
+
+void rack_dm_migrate_clean_up_region(struct rack_dm_region *region)
+{
+    u64 i;
+    struct rack_dm_page *rpage;
+
+    DEBUG_LOG("rack_dm_migrate_clean_up_region %p\n", region);
+
+    for (i = 0; i < region->max_pages; i++) {
+        rpage = &region->pages[i];
+        if (rpage->remote_page)
+            kfree(rpage->remote_page);
     }
 
     rack_dm_print_statistics(region);

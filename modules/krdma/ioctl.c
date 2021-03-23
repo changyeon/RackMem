@@ -42,7 +42,7 @@ static long krdma_ioctl_rpc_stress_test(unsigned long arg)
     long ret = 0;
     struct krdma_conn *conn;
 
-    conn = krdma_get_node(NULL);
+    conn = krdma_get_node();
     if (conn == NULL) {
         pr_err("error on krdma_get_node\n");
         ret = -EINVAL;

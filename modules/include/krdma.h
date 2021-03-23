@@ -63,6 +63,7 @@ struct krdma_poll_work {
 struct krdma_conn {
     struct hlist_node hn;
     char nodename[__NEW_UTS_LEN + 1];
+    u32 nodename_hash;
 
     /* cm related */
     int cm_error;
@@ -204,7 +205,7 @@ void krdma_poll_work(struct work_struct *ws);
 int krdma_send_rpc_request(struct krdma_conn *conn, struct krdma_msg *msg);
 int krdma_get_remote_rkey(struct krdma_conn *conn);
 int krdma_dummy_rpc(struct krdma_conn *conn, u64 val);
-int krdma_get_node_name(struct krdma_conn *conn, char *dst);
+int krdma_get_remote_node_name(struct krdma_conn *conn);
 int krdma_rpc_execute(struct krdma_conn *conn, struct krdma_msg *recv_msg);
 int handle_msg(struct krdma_conn *conn, struct ib_wc *wc);
 int register_all_krdma_rpc(void);
@@ -219,9 +220,12 @@ int krdma_test_rpc_performance(struct krdma_conn *conn, int nr_threads);
 /*
  * Exported APIs
  */
-void krdma_node_name(char *dst);
+void krdma_local_node_name(char *dst);
+u32 krdma_local_node_hash(void);
 int krdma_get_all_nodes(struct krdma_conn *nodes[], int n);
-struct krdma_conn *krdma_get_node(char *nodename);
+struct krdma_conn *krdma_get_node(void);
+struct krdma_conn *krdma_get_node_by_name(char *nodename);
+struct krdma_conn *krdma_get_node_by_key(u32 key);
 struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size);
 int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr);
 int krdma_poll_completion(struct ib_cq *cq, u64 *completion);

@@ -198,11 +198,8 @@ static void krdma_release_work(struct work_struct *ws)
  */
 static void add_krdma_node(struct krdma_conn *conn)
 {
-    unsigned int key;
-
-    key = hashlen_hash(hashlen_string(ht_krdma_node, conn->nodename));
     spin_lock(&ht_lock);
-    hash_add(ht_krdma_node, &conn->hn, key);
+    hash_add(ht_krdma_node, &conn->hn, conn->nodename_hash);
     spin_unlock(&ht_lock);
 }
 
@@ -692,7 +689,7 @@ static int krdma_cm_established_server(struct krdma_conn *conn)
     conn->remote_rkey = ret;
 
     /* update the remote node name and add it to the node hash table */
-    ret = krdma_get_node_name(conn, conn->nodename);
+    ret = krdma_get_remote_node_name(conn);
     if (ret) {
         pr_err("error on krdma_get_node_name\n");
         goto out;
@@ -702,7 +699,8 @@ static int krdma_cm_established_server(struct krdma_conn *conn)
     if (g_debug)
         print_conn(conn);
 
-    pr_info("connection established with %s\n", conn->nodename);
+    pr_info("connection established with %s (0x%x)\n", conn->nodename,
+            conn->nodename_hash);
 
     return 0;
 
@@ -786,7 +784,7 @@ static int krdma_cm_established_client(struct krdma_conn *conn)
     conn->remote_rkey = ret;
 
     /* update the remote node name and add it to the node hash table */
-    ret = krdma_get_node_name(conn, conn->nodename);
+    ret = krdma_get_remote_node_name(conn);
     if (ret) {
         pr_err("error on krdma_get_node_name\n");
         goto out;
@@ -796,7 +794,8 @@ static int krdma_cm_established_client(struct krdma_conn *conn)
     if (g_debug)
         print_conn(conn);
 
-    pr_info("connection established with %s\n", conn->nodename);
+    pr_info("connection established with %s (0x%x)\n", conn->nodename,
+            conn->nodename_hash);
 
     return 0;
 
@@ -1196,46 +1195,41 @@ int krdma_get_all_nodes(struct krdma_conn *nodes[], int n)
 }
 EXPORT_SYMBOL(krdma_get_all_nodes);
 
-
-/**
- * krdma_get_node - Returns the node associated with the given name.
- * If a name is not given, it returns the first node in the list.
- */
-struct krdma_conn *krdma_get_node(char *nodename)
+struct krdma_conn *krdma_get_node(void)
 {
     int bkt;
-    bool success = false;
+    struct krdma_conn *conn = NULL;
+
+    hash_for_each(ht_krdma_node, bkt, conn, hn)
+        break;
+
+    return conn;
+}
+EXPORT_SYMBOL(krdma_get_node);
+
+struct krdma_conn *krdma_get_node_by_name(char *nodename)
+{
     unsigned int key;
     struct krdma_conn *conn = NULL;
 
-    if (hash_empty(ht_krdma_node)) {
-        pr_err("the node hash table is null\n");
-        goto out;
-    }
+    key = hashlen_hash(hashlen_string(NULL, nodename));
 
-    if (nodename == NULL) {
-        hash_for_each(ht_krdma_node, bkt, conn, hn) {
-            /* break here to return the first node in the hash table */
-            goto success;
-        }
-    }
-
-    key = hashlen_hash(hashlen_string(ht_krdma_node, nodename));
-    hash_for_each_possible(ht_krdma_node, conn, hn, key) {
-        if (strcmp(conn->nodename, nodename) == 0) {
-            success = true;
+    hash_for_each_possible(ht_krdma_node, conn, hn, key)
+        if (strcmp(conn->nodename, nodename) == 0)
             break;
-        }
-    }
 
-    if (!success) {
-        pr_err("the node %s does not exists in the table\n", nodename);
-        goto out;
-    }
-
-success:
     return conn;
-out:
-    return NULL;
 }
-EXPORT_SYMBOL(krdma_get_node);
+EXPORT_SYMBOL(krdma_get_node_by_name);
+
+struct krdma_conn *krdma_get_node_by_key(u32 key)
+{
+    struct krdma_conn *conn = NULL;
+
+    hash_for_each_possible(ht_krdma_node, conn, hn, key)
+        if (conn->nodename_hash == key)
+            break;
+
+    return conn;
+}
+EXPORT_SYMBOL(krdma_get_node_by_key);

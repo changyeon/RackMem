@@ -66,6 +66,12 @@ static int start_server(int port)
         goto out_close_new_fd;
     }
 
+    ret = rack_dm_migrate_clean_up(msg.node, msg.region_id);
+    if (ret) {
+        perror("error on rack_dm_migrate_clean_up");
+        goto out_close_new_fd;
+    }
+
     cnt = 0;
     n = region_size / page_size;
     for (i = 0; i < n; i++) {

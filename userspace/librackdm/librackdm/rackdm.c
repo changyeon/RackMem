@@ -81,7 +81,7 @@ struct mmap_msg {
     char remote_node[64];
 };
 
-struct rack_dm_region *rack_dm_mmap(const char *node, uint64_t region_id,
+struct rack_dm_region *rack_dm_mmap(const char *node, uint64_t remote_region_id,
                                     uint64_t size)
 {
     int ret;
@@ -94,8 +94,14 @@ struct rack_dm_region *rack_dm_mmap(const char *node, uint64_t region_id,
         goto out;
     }
 
+    ret = rack_dm_page_init(region, 0);
+    if (ret) {
+        perror("error on rack_dm_page_init");
+        goto out;
+    }
+
     msg.region_id = region->id;
-    msg.remote_region_id = region_id;
+    msg.remote_region_id = remote_region_id;
     strcpy(msg.remote_node, node);
 
     ret = rack_dm_ioctl(RACK_DM_IOCTL_MMAP, (struct rack_dm_ioctl_msg *) &msg);
@@ -130,6 +136,88 @@ int rack_dm_close(struct rack_dm_region *region)
     msg.region_id = region->id;
 
     ret = rack_dm_ioctl(RACK_DM_IOCTL_CLOSE, (struct rack_dm_ioctl_msg *) &msg);
+    if (ret) {
+        perror("error on mmap ioctl");
+        goto out;
+    }
+
+    return 0;
+
+out:
+    return ret;
+}
+
+struct page_init_msg {
+    uint64_t region_id;
+    uint64_t pg_index;
+};
+
+int rack_dm_page_init(struct rack_dm_region *region, uint64_t pg_index)
+{
+    int ret;
+    struct page_init_msg msg;
+
+    memset(&msg, 0, sizeof(msg));
+    msg.region_id = region->id;
+    msg.pg_index = pg_index;
+
+    ret = rack_dm_ioctl(
+            RACK_DM_IOCTL_PAGE_INIT, (struct rack_dm_ioctl_msg *) &msg);
+    if (ret) {
+        perror("error on mmap ioctl");
+        goto out;
+    }
+
+    return 0;
+
+out:
+    return ret;
+}
+
+struct set_persistent_msg {
+    uint64_t region_id;
+    uint64_t val;
+};
+
+int rack_dm_set_persistent(struct rack_dm_region *region, uint64_t val)
+{
+    int ret;
+    struct set_persistent_msg msg;
+
+    memset(&msg, 0, sizeof(msg));
+    msg.region_id = region->id;
+    msg.val = val;
+
+    ret = rack_dm_ioctl(
+            RACK_DM_IOCTL_SET_PERSISTENT, (struct rack_dm_ioctl_msg *) &msg);
+    if (ret) {
+        perror("error on mmap ioctl");
+        goto out;
+    }
+
+    return 0;
+
+out:
+    return ret;
+}
+
+struct migrate_clean_up_msg {
+    uint64_t remote_region_id;
+    char remote_node[64];
+};
+
+int rack_dm_migrate_clean_up(const char *node, uint64_t remote_region_id)
+{
+    int ret;
+    struct migrate_clean_up_msg msg;
+
+    memset(&msg, 0, sizeof(msg));
+
+    msg.remote_region_id = remote_region_id;
+    strcpy(msg.remote_node, node);
+
+    ret = rack_dm_ioctl(
+            RACK_DM_IOCTL_MIGRATE_CLEAN_UP, (struct rack_dm_ioctl_msg *) &msg);
     if (ret) {
         perror("error on mmap ioctl");
         goto out;

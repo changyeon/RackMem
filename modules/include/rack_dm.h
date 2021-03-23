@@ -75,7 +75,6 @@ struct remote_page {
     struct krdma_conn *conn;
     u64 remote_paddr;
     u64 remote_vaddr;
-    struct list_head head;
 };
 
 struct rack_dm_page {
@@ -88,6 +87,7 @@ struct rack_dm_page {
 };
 
 struct rack_dm_region {
+    bool persistent;
     u64 id;
     u64 size;
     u64 page_size;
@@ -121,16 +121,19 @@ void *rack_dm_alloc_buf(struct rack_dm_region *region);
 int rack_dm_map_region(struct rack_dm_region *region, struct vm_area_struct *vma, struct vm_operations_struct *vm_ops);
 struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size);
 void rack_dm_free_region(struct rack_dm_region *region);
+void rack_dm_migrate_clean_up_region(struct rack_dm_region *region);
+int rack_dm_rdma(struct krdma_conn *conn, u64 local_dma_addr, u64 remote_dma_addr, u64 size, int dir);
 
 /* remote memory */
-int alloc_remote_page(struct rack_dm_page *rpage, u64 page_size);
-int free_remote_page(struct krdma_conn *conn, u64 size, u64 remote_vaddr, u64 remote_paddr);
+int alloc_remote_user_page(struct rack_dm_page *rpage, u64 page_size);
+int free_remote_user_page(struct krdma_conn *conn, u64 size, u64 remote_vaddr, u64 remote_paddr);
 int update_rdma_node_list(void);
 void free_rdma_node_list(void);
 
 /* rpc */
 int rack_dm_setup_rpc(void);
 void rack_dm_cleanup_rpc(void);
-int get_region_metadata(struct krdma_conn *conn, u64 region_id);
+int get_region_metadata(struct krdma_conn *conn, struct rack_dm_region *region, u64 remote_region_id);
+int migrate_clean_up(struct krdma_conn *conn, u64 remote_region_id);
 
 #endif /* _INCLUDE_RACK_DM_H_ */

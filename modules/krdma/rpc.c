@@ -337,8 +337,8 @@ static int general_rpc_request_handler(struct krdma_conn *conn,
     if (send_buf->ret >= 0)
         send_buf->size = send_buf->ret;
 
-    DEBUG_LOG("rpc_request_general_rpc_id send_buf ret: %d, size: %u\n",
-              send_buf->ret, send_buf->size);
+    DEBUG_LOG("rpc_request_general_rpc id: %d send_buf ret: %d, size: %u\n",
+              recv_buf->rpc_id, send_buf->ret, send_buf->size);
 
     send_msg->send_wr.wr_id = (u64) send_msg;
 
@@ -672,7 +672,7 @@ static int get_node_name_rpc_handler(void *input, void *output, void *ctx)
     return ret;
 }
 
-int krdma_get_node_name(struct krdma_conn *conn, char *dst)
+int krdma_get_remote_node_name(struct krdma_conn *conn)
 {
     int ret;
     struct krdma_msg *send_msg;
@@ -704,7 +704,8 @@ int krdma_get_node_name(struct krdma_conn *conn, char *dst)
         goto out_free_msg;
     }
 
-    strcpy(dst, (void *) &fmt->payload);
+    strcpy(conn->nodename, (void *) &fmt->payload);
+    conn->nodename_hash = hashlen_hash(hashlen_string(NULL, conn->nodename));
 
     krdma_free_msg(conn, send_msg);
 
@@ -715,7 +716,6 @@ out_free_msg:
 out:
     return ret;
 }
-EXPORT_SYMBOL(krdma_get_node_name);
 
 static int alloc_remote_memory_rpc_handler(void *input, void *output, void *ctx)
 {
