@@ -4,11 +4,12 @@ static int start_server(int port)
 {
     int ret, fd, new_fd, len;
     int opt = 1, backlog = 128;
-    uint64_t i, n, cnt, region_size = 32768UL, page_size = 4096UL;
+    uint64_t i, n, cnt, region_size = REGION_SIZE, page_size = 4096UL;
     uint64_t *ptr;
     struct sockaddr_in addr;
     struct migrate_msg msg;
     struct rack_dm_region *region;
+    struct timespec t0, t1;
 
     memset(&msg, 0, sizeof(msg));
 
@@ -59,12 +60,22 @@ static int start_server(int port)
     printf("node: %s, region_id: %lu, region_size: %lu\n",
            msg.node, msg.region_id, msg.region_size);
 
+    memset(&t0, 0, sizeof(t0));
+    memset(&t1, 0, sizeof(t1));
+
+    printf("start migration\n");
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     region = rack_dm_mmap(msg.node, msg.region_id, msg.region_size);
     if (region == NULL) {
         ret = -EINVAL;
         perror("error on rack_dm_mmap");
         goto out_close_new_fd;
     }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    printf("migration finished\n");
+
+    printf("migration_time size: %lu, usecs: %lu\n", REGION_SIZE,
+           (uint64_t) (((10e9 * t1.tv_sec + t1.tv_nsec) - (10e9 * t0.tv_sec + t0.tv_nsec)) / 1000));
 
     ret = rack_dm_migrate_clean_up(msg.node, msg.region_id);
     if (ret) {
