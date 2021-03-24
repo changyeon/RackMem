@@ -458,14 +458,16 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
             pg_paddr = ib_dma_map_page(ib_dev, vmalloc_to_page(rpage->buf),
                                        0, 4096, DMA_BIDIRECTIONAL);
             if (rpage->remote_page) {
-                ret = free_remote_user_page(
-                        rpage->remote_page->conn, region->page_size,
-                        rpage->remote_page->remote_vaddr,
-                        rpage->remote_page->remote_paddr);
-                if (ret) {
-                    pr_err("error on free_remote_user_page\n");
-                    goto out_free_dma_buf;
-                }
+                /*
+                 *ret = free_remote_user_page(
+                 *        rpage->remote_page->conn, region->page_size,
+                 *        rpage->remote_page->remote_vaddr,
+                 *        rpage->remote_page->remote_paddr);
+                 *if (ret) {
+                 *    pr_err("error on free_remote_user_page\n");
+                 *    goto out_free_dma_buf;
+                 *}
+                 */
                 kfree(rpage->remote_page);
                 rpage->remote_page = NULL;
             }

@@ -57,6 +57,11 @@ static int migrate_src(char *server, int port)
         *ptr = i;
     }
 
+    for (i = 0; i < n; i++) {
+        ptr = (uint64_t *) (((uint64_t) region->buf) + i * page_size);
+        *ptr = i;
+    }
+
     fd = connect_server(server, port);
     if (fd < 0) {
         perror("error on connect_server");

@@ -337,7 +337,7 @@ static int general_rpc_request_handler(struct krdma_conn *conn,
     if (send_buf->ret >= 0)
         send_buf->size = send_buf->ret;
 
-    DEBUG_LOG("rpc_request_general_rpc id: %d send_buf ret: %d, size: %u\n",
+    DEBUG_LOG("rpc_request_general_rpc id: %u send_buf ret: %d, size: %u\n",
               recv_buf->rpc_id, send_buf->ret, send_buf->size);
 
     send_msg->send_wr.wr_id = (u64) send_msg;
