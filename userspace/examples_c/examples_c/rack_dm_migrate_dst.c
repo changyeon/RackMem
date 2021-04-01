@@ -63,11 +63,16 @@ static int start_server(int port)
     memset(&t0, 0, sizeof(t0));
     memset(&t1, 0, sizeof(t1));
 
-    printf("start migration\n");
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    region = rack_dm_mmap(msg.node, msg.region_id, msg.region_size);
+
+    region = rack_dm_open(msg.region_size);
     if (region == NULL) {
         ret = -EINVAL;
+        goto out;
+    }
+    printf("start migration\n");
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    ret = rack_dm_mmap(region, msg.node, msg.region_id);
+    if (ret) {
         perror("error on rack_dm_mmap");
         goto out_close_new_fd;
     }

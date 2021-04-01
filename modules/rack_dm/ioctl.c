@@ -118,7 +118,7 @@ static long rack_dm_ioctl_page_init(unsigned long arg)
         rpage->remote_page = NULL;
         count_event(region, RACK_DM_EVENT_FREE_REMOTE_PAGE);
     }
-    rpage->flags = 0;
+    rpage->flags = RACK_DM_PAGE_IDLE;
 
     return 0;
 

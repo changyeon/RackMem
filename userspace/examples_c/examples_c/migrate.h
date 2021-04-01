@@ -16,7 +16,7 @@
 #define GET_DIFF_NS(t0, t1) \
     (10e9 * t1.tv_sec + t1.tv_nsec) - (10e9 * t0.tv_sec + t0.tv_nsec)
 
-#define REGION_SIZE 1073741824UL
+#define REGION_SIZE 536870912UL
 
 struct migrate_msg {
     char node[64];

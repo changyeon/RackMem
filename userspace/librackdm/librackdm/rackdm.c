@@ -36,7 +36,7 @@ out:
 struct rack_dm_region *rack_dm_open(uint64_t size)
 {
     struct rack_dm_region *region;
-    int fd;
+    int fd, ret;
     void *buf;
 
     region = malloc(sizeof(*region));
@@ -61,7 +61,12 @@ struct rack_dm_region *rack_dm_open(uint64_t size)
     strcpy(region->node, (char *) (((uint64_t) buf) + sizeof(uint64_t)));
     region->size = size;
     region->buf = buf;
-    memset(buf, 0, 4096UL);
+
+    ret = rack_dm_page_init(region, 0);
+    if (ret) {
+        perror("error on rack_dm_page_init");
+        goto out_close_fd;
+    }
 
     close(fd);
 
@@ -81,24 +86,11 @@ struct mmap_msg {
     char remote_node[64];
 };
 
-struct rack_dm_region *rack_dm_mmap(const char *node, uint64_t remote_region_id,
-                                    uint64_t size)
+int rack_dm_mmap(struct rack_dm_region * region, const char *node,
+                 uint64_t remote_region_id)
 {
     int ret;
     struct mmap_msg msg;
-    struct rack_dm_region *region;
-
-    region = rack_dm_open(size);
-    if (region == NULL) {
-        perror("error on rack_dm_open");
-        goto out;
-    }
-
-    ret = rack_dm_page_init(region, 0);
-    if (ret) {
-        perror("error on rack_dm_page_init");
-        goto out;
-    }
 
     msg.region_id = region->id;
     msg.remote_region_id = remote_region_id;
@@ -107,13 +99,14 @@ struct rack_dm_region *rack_dm_mmap(const char *node, uint64_t remote_region_id,
     ret = rack_dm_ioctl(RACK_DM_IOCTL_MMAP, (struct rack_dm_ioctl_msg *) &msg);
     if (ret) {
         perror("error on mmap ioctl");
+        ret = -EINVAL;
         goto out;
     }
 
-    return region;
+    return 0;
 
 out:
-    return NULL;
+    return ret;
 }
 
 struct close_msg {

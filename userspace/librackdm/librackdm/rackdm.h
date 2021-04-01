@@ -25,7 +25,7 @@ struct rack_dm_region {
 };
 
 struct rack_dm_region *rack_dm_open(uint64_t size);
-struct rack_dm_region *rack_dm_mmap(const char *node, uint64_t remote_region_id, uint64_t size);
+int rack_dm_mmap(struct rack_dm_region * region, const char *node, uint64_t remote_region_id);
 int rack_dm_close(struct rack_dm_region *region);
 int rack_dm_page_init(struct rack_dm_region *region, uint64_t pg_index);
 int rack_dm_set_persistent(struct rack_dm_region *region, uint64_t val);
