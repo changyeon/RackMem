@@ -590,13 +590,19 @@ int get_region_metadata(struct krdma_conn *conn,
             ib_dma_unmap_page(
                     conn->cm_id->device, pg_paddr, region->page_size,
                     DMA_BIDIRECTIONAL);
-            ret = rack_dm_remap(region, rpage,
-                                region->vma->vm_start + i * region->page_size,
-                                region->page_size);
-            if (ret) {
-                pr_err("failed to remap the page\n");
-                goto out_free_dma_buf;
-            }
+            rpage->flags = RACK_DM_PAGE_INACTIVE;
+            rack_dm_page_list_add(&region->inactive_list, rpage);
+            /*
+             *ret = rack_dm_remap(region, rpage,
+             *                    region->vma->vm_start + i * region->page_size,
+             *                    region->page_size);
+             */
+            /*
+             *if (ret) {
+             *    pr_err("failed to remap the page\n");
+             *    goto out_free_dma_buf;
+             *}
+             */
             DEBUG_LOG("[***] (restore local page) index: %llu, vaddr: %llu, "
                       "paddr: %llu\n", pg_index, pg_vaddr, pg_paddr);
         } else {
