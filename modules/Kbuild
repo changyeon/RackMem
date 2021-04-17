@@ -1,4 +1,4 @@
-obj-m := rack_dm.o rack_vm.o rack_block.o rack_dvs_rdma.o rack_dvs_dram.o rack_dvs.o krdma.o
+obj-m := rack_dm.o rack_vm.o rack_block.o rack_dvs_rdma.o rack_dvs_dram.o rack_dvs.o rack_rpc.o krdma.o
 
 ccflags-y := -I$(src)/include
 
@@ -13,5 +13,7 @@ rack_dvs_rdma-y := rack_dvs/rdma_backend.o rack_dvs/test.o
 rack_dvs_dram-y := rack_dvs/dram_backend.o rack_dvs/test.o
 
 rack_dvs-y := rack_dvs/rack_dvs.o
+
+rack_rpc-y := rack_rpc/rack_rpc.o
 
 krdma-y := krdma/krdma.o krdma/cm.o krdma/ioctl.o krdma/dbgfs.o krdma/rpc.o krdma/rdma.o krdma/benchmark.o
