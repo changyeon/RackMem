@@ -7,6 +7,7 @@
 #include <linux/mm_types.h>
 #include <linux/atomic.h>
 #include <linux/percpu-defs.h>
+#include <linux/debugfs.h>
 #include <krdma.h>
 
 #define count_event(region, event) \
@@ -88,7 +89,8 @@ struct rack_dm_page {
 
 struct rack_dm_region {
     bool persistent;
-    u64 id;
+    u64 rid;
+    u64 pid;
     u64 size;
     u64 page_size;
     u64 max_pages;
@@ -101,6 +103,10 @@ struct rack_dm_region {
 
     struct vm_area_struct *vma;
     struct rack_dm_event_count __percpu *stat;
+
+    struct dentry *dbgfs_root;
+    struct dentry *dbgfs_stat;
+
     spinlock_t lock;
 };
 

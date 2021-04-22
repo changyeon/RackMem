@@ -351,7 +351,7 @@ static int write_region_id(struct rack_dm_region *region)
         goto out;
     }
 
-    *((u64 *) rpage->buf) = region->id;
+    *((u64 *) rpage->buf) = region->rid;
     krdma_local_node_name((char *) ((u64) rpage->buf + sizeof(u64)));
 
     DEBUG_LOG("write_region_id id: %llu, node_name: %s\n",
@@ -381,6 +381,8 @@ int rack_dm_map_region(struct rack_dm_region *region,
     int ret;
 
     region->vma = vma;
+    region->pid = (u64) region->vma->vm_mm->owner->pid;
+
     vma->vm_private_data = (void *) region;
     vma->vm_ops = vm_ops;
     vma->vm_flags |= VM_MIXEDMAP;
@@ -418,7 +420,7 @@ struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
         goto out;
     }
 
-    region->id = (u64) region;
+    region->rid = (u64) region;
     region->size = total_size_bytes;
     region->page_size = page_size;
     region->max_pages = total_size_bytes / page_size;
