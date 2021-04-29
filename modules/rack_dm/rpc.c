@@ -592,6 +592,9 @@ int get_region_metadata(struct krdma_conn *conn,
                     DMA_BIDIRECTIONAL);
             rpage->flags = RACK_DM_PAGE_INACTIVE;
             rack_dm_page_list_add(&region->inactive_list, rpage);
+
+            atomic64_fetch_add(1, &region->page_count);
+            count_event(region, RACK_DM_EVENT_ALLOC_LOCAL_PAGE);
             /*
              *ret = rack_dm_remap(region, rpage,
              *                    region->vma->vm_start + i * region->page_size,
