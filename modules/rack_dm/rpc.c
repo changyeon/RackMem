@@ -128,15 +128,124 @@ out:
     return ret;
 }
 
-int alloc_remote_user_page(struct rack_dm_page *rpage, u64 page_size)
+void refill_remote_page_list(struct work_struct *ws)
+{
+    struct rack_dm_work *work;
+    struct rack_dm_region *region;
+    struct rack_dm_page_list *remote_page_list;
+    struct remote_page *remote_page;
+    int i, ret;
+
+    work = container_of(ws, struct rack_dm_work, ws);
+    region = work->region;
+    remote_page_list = &region->remote_page_list;
+
+    for (i = 0; i < 1024; i++) {
+        remote_page = kzalloc(sizeof(*remote_page), GFP_KERNEL);
+        ret = alloc_remote_page(region, remote_page);
+        if (ret) {
+            pr_err("error on alloc_remote_user_page\n");
+            break;
+        }
+        spin_lock(&remote_page_list->lock);
+        list_add_tail(&remote_page->head, &remote_page_list->head);
+        remote_page_list->size++;
+        spin_unlock(&remote_page_list->lock);
+    }
+
+    count_event(region, RACK_DM_EVENT_REMOTE_PAGE_REFILL);
+}
+
+int alloc_remote_page(struct rack_dm_region *region,
+                      struct remote_page *remote_page)
 {
     int ret;
-    struct remote_page *remote_page;
     struct rack_dm_node *node;
     struct krdma_msg *send_msg;
     struct rpc_msg_fmt *fmt;
     struct payload_fmt *payload;
 
+    /* slow path */
+    node = get_node_round_robin();
+    if (node == NULL) {
+        pr_err("error on get_node_round_robin\n");
+        ret = -EINVAL;
+        goto out_free_remote_page;
+    }
+
+    send_msg = krdma_alloc_msg(node->conn, 4096);
+    if (send_msg == NULL) {
+        pr_err("error on krdma_alloc_msg\n");
+        ret = -EINVAL;
+        goto out_free_remote_page;
+    }
+
+    fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
+    fmt->cmd = KRDMA_CMD_GENERAL_RPC_REQUEST;
+    fmt->rpc_id = RACK_DM_RPC_ALLOC_REMOTE_USER_PAGE;
+
+    fmt->payload = region->page_size;
+    fmt->size = sizeof(u64);
+
+    ret = krdma_send_rpc_request(node->conn, send_msg);
+    if (ret) {
+        pr_err("error on krdma_send_rpc_request\n");
+        goto out_free_msg;
+    }
+
+    if (fmt->ret < 0) {
+        pr_err("failed rpc request %d\n", fmt->rpc_id);
+        goto out_free_msg;
+    }
+
+    payload = (struct payload_fmt *) &fmt->payload;
+    remote_page->conn = node->conn;
+    remote_page->remote_vaddr = payload->arg1;
+    remote_page->remote_paddr = payload->arg2;
+    INIT_LIST_HEAD(&remote_page->head);
+
+    krdma_free_msg(node->conn, send_msg);
+
+    return 0;
+
+out_free_msg:
+    krdma_free_msg(node->conn, send_msg);
+out_free_remote_page:
+    kfree(remote_page);
+    return ret;
+}
+
+int alloc_remote_user_page(struct rack_dm_region *region,
+                           struct rack_dm_page *rpage)
+{
+    int ret;
+    struct remote_page *remote_page = NULL;
+    struct rack_dm_node *node;
+    struct krdma_msg *send_msg;
+    struct rpc_msg_fmt *fmt;
+    struct payload_fmt *payload;
+    struct rack_dm_page_list *remote_page_list = &region->remote_page_list;
+
+    /* fast path */
+    spin_lock(&remote_page_list->lock);
+    if (remote_page_list->size > 0) {
+        remote_page = list_first_entry(
+                &remote_page_list->head, struct remote_page, head);
+        list_del_init(&remote_page->head);
+        remote_page_list->size--;
+    }
+    if (remote_page_list->size < 1024) {
+        /* launch a background task to add remote pages to the list */
+        schedule_work(&region->remote_page_work.ws);
+    }
+    spin_unlock(&remote_page_list->lock);
+
+    if (remote_page) {
+        count_event(region, RACK_DM_EVENT_ALLOC_REMOTE_PAGE_FAST);
+        goto success;
+    }
+
+    /* slow path */
     remote_page = kzalloc(sizeof(*remote_page), GFP_KERNEL);
     if (remote_page == NULL) {
         pr_err("failed to allocate memory for struct remote_page\n");
@@ -162,7 +271,7 @@ int alloc_remote_user_page(struct rack_dm_page *rpage, u64 page_size)
     fmt->cmd = KRDMA_CMD_GENERAL_RPC_REQUEST;
     fmt->rpc_id = RACK_DM_RPC_ALLOC_REMOTE_USER_PAGE;
 
-    fmt->payload = page_size;
+    fmt->payload = region->page_size;
     fmt->size = sizeof(u64);
 
     ret = krdma_send_rpc_request(node->conn, send_msg);
@@ -180,10 +289,13 @@ int alloc_remote_user_page(struct rack_dm_page *rpage, u64 page_size)
     remote_page->conn = node->conn;
     remote_page->remote_vaddr = payload->arg1;
     remote_page->remote_paddr = payload->arg2;
-
-    rpage->remote_page = remote_page;
+    INIT_LIST_HEAD(&remote_page->head);
 
     krdma_free_msg(node->conn, send_msg);
+    count_event(region, RACK_DM_EVENT_ALLOC_REMOTE_PAGE_SLOW);
+
+success:
+    rpage->remote_page = remote_page;
 
     return 0;
 
@@ -588,11 +700,6 @@ int get_region_metadata(struct krdma_conn *conn,
             ib_dma_unmap_page(
                     conn->cm_id->device, pg_paddr, region->page_size,
                     DMA_BIDIRECTIONAL);
-
-            /*
-             *rpage->flags = RACK_DM_PAGE_INACTIVE;
-             *rack_dm_page_list_add(&region->inactive_list, rpage);
-             */
 
             ret = rack_dm_remap(
                     region, rpage,

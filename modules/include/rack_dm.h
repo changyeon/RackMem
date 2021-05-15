@@ -8,6 +8,7 @@
 #include <linux/atomic.h>
 #include <linux/percpu-defs.h>
 #include <linux/debugfs.h>
+#include <linux/workqueue.h>
 #include <krdma.h>
 
 #define count_event(region, event) \
@@ -23,7 +24,9 @@ enum rack_dm_event {
     RACK_DM_EVENT_RDMA_WRITE,
     RACK_DM_EVENT_ALLOC_LOCAL_PAGE,
     RACK_DM_EVENT_FREE_LOCAL_PAGE,
-    RACK_DM_EVENT_ALLOC_REMOTE_PAGE,
+    RACK_DM_EVENT_ALLOC_REMOTE_PAGE_FAST,
+    RACK_DM_EVENT_ALLOC_REMOTE_PAGE_SLOW,
+    RACK_DM_EVENT_REMOTE_PAGE_REFILL,
     RACK_DM_EVENT_FREE_REMOTE_PAGE,
     RACK_DM_EVENT_RECLAIM_INACTIVE,
     RACK_DM_EVENT_RECLAIM_INACTIVE_MISS,
@@ -47,7 +50,9 @@ static const char * const rack_dm_events[] = {
     [RACK_DM_EVENT_RDMA_WRITE]              = "rdma_write",
     [RACK_DM_EVENT_ALLOC_LOCAL_PAGE]        = "alloc_local_page",
     [RACK_DM_EVENT_FREE_LOCAL_PAGE]         = "free_local_page",
-    [RACK_DM_EVENT_ALLOC_REMOTE_PAGE]       = "alloc_remote_page",
+    [RACK_DM_EVENT_ALLOC_REMOTE_PAGE_FAST]  = "alloc_remote_page_fast",
+    [RACK_DM_EVENT_ALLOC_REMOTE_PAGE_SLOW]  = "alloc_remote_page_slow",
+    [RACK_DM_EVENT_REMOTE_PAGE_REFILL]      = "remote_page_refill",
     [RACK_DM_EVENT_FREE_REMOTE_PAGE]        = "free_remote_page",
     [RACK_DM_EVENT_RECLAIM_INACTIVE]        = "reclaim_inactive",
     [RACK_DM_EVENT_RECLAIM_INACTIVE_MISS]   = "reclaim_inactive_miss",
@@ -72,10 +77,17 @@ struct rack_dm_page_list {
     spinlock_t lock;
 };
 
+struct remote_page_pool {
+    int size;
+    struct list_head head;
+    spinlock_t lock;
+};
+
 struct remote_page {
     struct krdma_conn *conn;
     u64 remote_paddr;
     u64 remote_vaddr;
+    struct list_head head;
 };
 
 struct rack_dm_page {
@@ -85,6 +97,11 @@ struct rack_dm_page {
     struct remote_page *remote_page;
     struct list_head head;
     spinlock_t lock;
+};
+
+struct rack_dm_work {
+    struct work_struct ws;
+    struct rack_dm_region *region;
 };
 
 struct rack_dm_region {
@@ -100,6 +117,9 @@ struct rack_dm_region {
     struct rack_dm_page *pages;
     struct rack_dm_page_list active_list;
     struct rack_dm_page_list inactive_list;
+    struct rack_dm_page_list remote_page_list;
+
+    struct rack_dm_work remote_page_work;
 
     struct vm_area_struct *vma;
     struct rack_dm_event_count __percpu *stat;
@@ -129,9 +149,11 @@ struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size);
 void rack_dm_free_region(struct rack_dm_region *region);
 void rack_dm_migrate_clean_up_region(struct rack_dm_region *region);
 int rack_dm_rdma(struct krdma_conn *conn, u64 local_dma_addr, u64 remote_dma_addr, u64 size, int dir);
+void refill_remote_page_list(struct work_struct *ws);
 
 /* remote memory */
-int alloc_remote_user_page(struct rack_dm_page *rpage, u64 page_size);
+int alloc_remote_user_page(struct rack_dm_region *region, struct rack_dm_page *rpage);
+int alloc_remote_page(struct rack_dm_region *region, struct remote_page *remote_page);
 int free_remote_user_page(struct krdma_conn *conn, u64 size, u64 remote_vaddr, u64 remote_paddr);
 int update_rdma_node_list(void);
 void free_rdma_node_list(void);

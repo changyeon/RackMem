@@ -190,12 +190,11 @@ int rack_dm_writeback(struct rack_dm_region *region,
               rpage->index);
 
     if (rpage->remote_page == NULL) {
-        ret = alloc_remote_user_page(rpage, region->page_size);
+        ret = alloc_remote_user_page(region, rpage);
         if (ret) {
             pr_err("error on alloc_remote_page\n");
             goto out;
         }
-        count_event(region, RACK_DM_EVENT_ALLOC_REMOTE_PAGE);
     }
 
     if (rpage->remote_page == NULL) {
@@ -440,12 +439,19 @@ struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
     }
     rack_dm_page_list_init(&region->active_list);
     rack_dm_page_list_init(&region->inactive_list);
+    rack_dm_page_list_init(&region->remote_page_list);
+
+    region->remote_page_work.region = region;
+    INIT_WORK(&region->remote_page_work.ws, refill_remote_page_list);
+
     region->stat = alloc_percpu(struct rack_dm_event_count);
     if (region->stat == NULL) {
         pr_err("error on alloc_percpu (region->stat)\n");
         goto out_vfree_pages;
     }
     spin_lock_init(&region->lock);
+
+    schedule_work(&region->remote_page_work.ws);
 
     return region;
 
@@ -470,6 +476,20 @@ static void rack_dm_print_statistics(struct rack_dm_region *region)
     for (i = 0; i < __NR_RACK_DM_EVENTS; i++)
         pr_info("statistics (%p) %s: %llu\n", region, rack_dm_events[i],
                 sum[i]);
+}
+
+static void free_remote_page_list(struct rack_dm_region *region)
+{
+    struct rack_dm_page_list *remote_page_list = &region->remote_page_list;
+    struct remote_page *remote_page;
+
+    spin_lock(&remote_page_list->lock);
+    list_for_each_entry(remote_page, &remote_page_list->head, head) {
+        free_remote_user_page(
+                remote_page->conn, region->page_size,
+                remote_page->remote_vaddr, remote_page->remote_paddr);
+    }
+    spin_unlock(&remote_page_list->lock);
 }
 
 void rack_dm_free_region(struct rack_dm_region *region)
@@ -500,6 +520,8 @@ void rack_dm_free_region(struct rack_dm_region *region)
             count_event(region, RACK_DM_EVENT_FREE_REMOTE_PAGE);
         }
     }
+
+    free_remote_page_list(region);
 
     rack_dm_print_statistics(region);
     free_percpu(region->stat);
