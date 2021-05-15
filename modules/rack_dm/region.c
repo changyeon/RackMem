@@ -251,7 +251,6 @@ void *rack_dm_reclaim_active(struct rack_dm_region *region)
 
     if (rpage == NULL) {
         pr_err("failed to reclaim a page from active_list\n");
-        rpage->flags = RACK_DM_PAGE_ERROR;
         goto out;
     }
 
@@ -319,6 +318,7 @@ void *rack_dm_alloc_buf(struct rack_dm_region *region)
 
     if (page_count >= page_count_limit) {
         atomic64_dec(&region->page_count);
+        region->full = true;
         goto out;
     }
 
@@ -398,6 +398,40 @@ out:
     return ret;
 }
 
+static void reclaim_active_pages(struct work_struct *ws)
+{
+    struct rack_dm_work *work;
+    struct rack_dm_region *region;
+    int i, ret;
+    struct rack_dm_page *rpage;
+
+    work = container_of(ws, struct rack_dm_work, ws);
+    region = work->region;
+
+    count_event(region, RACK_DM_EVENT_BG_RECLAIM_TASK);
+
+    for (i = 0; i < 1024; i++) {
+        rpage = rack_dm_page_list_pop(&region->active_list);
+        if (rpage == NULL) {
+            pr_err("failed to reclaim a page from active_list\n");
+            break;
+        }
+        spin_lock(&rpage->lock);
+        rack_dm_unmap(region, rpage);
+        ret = rack_dm_writeback(region, rpage);
+        if (ret) {
+            pr_err("error on rack_dm_writeback: %p\n", rpage);
+            rpage->flags = RACK_DM_PAGE_ERROR;
+            spin_unlock(&rpage->lock);
+            break;
+        }
+        rack_dm_page_list_add(&region->inactive_list, rpage);
+        spin_unlock(&rpage->lock);
+
+        count_event(region, RACK_DM_EVENT_BG_RECLAIM);
+    }
+}
+
 struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
 {
     u64 i, total_size_bytes;
@@ -426,6 +460,7 @@ struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
 
     atomic64_set(&region->page_count_limit, g_local_pages);
     atomic64_set(&region->page_count, 0);
+    region->full = false;
 
     region->pages = vzalloc(region->max_pages * sizeof(struct rack_dm_page));
     if (region->pages == NULL) {
@@ -443,6 +478,9 @@ struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
 
     region->remote_page_work.region = region;
     INIT_WORK(&region->remote_page_work.ws, refill_remote_page_list);
+
+    region->reclaim_work.region = region;
+    INIT_WORK(&region->reclaim_work.ws, reclaim_active_pages);
 
     region->stat = alloc_percpu(struct rack_dm_event_count);
     if (region->stat == NULL) {

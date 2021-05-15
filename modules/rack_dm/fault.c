@@ -74,6 +74,21 @@ void rack_dm_close(struct vm_area_struct *vma)
     vma->vm_private_data = NULL;
 }
 
+static inline void background_reclaim(struct rack_dm_region *region)
+{
+    bool reclaim = false;
+
+    if (region->full) {
+        spin_lock(&region->inactive_list.lock);
+        if (region->inactive_list.size < 1024)
+            reclaim = true;
+        spin_unlock(&region->inactive_list.lock);
+
+        if (reclaim)
+            schedule_work(&region->reclaim_work.ws);
+    }
+}
+
 vm_fault_t rack_dm_fault(struct vm_fault *vmf)
 {
     int ret = 0;
@@ -123,8 +138,10 @@ vm_fault_t rack_dm_fault(struct vm_fault *vmf)
 
     /* Step 5: Try to reclaim a page from the inactive list */
     rpage->buf = rack_dm_reclaim_inactive(region);
-    if (rpage->buf)
+    if (rpage->buf) {
+        count_event(region, RACK_DM_EVENT_RECLAIM_FAST);
         goto success_reclaim;
+    }
 
     /* Step 6: Reclaim a page from the active list */
     rpage->buf = rack_dm_reclaim_active(region);
@@ -132,6 +149,7 @@ vm_fault_t rack_dm_fault(struct vm_fault *vmf)
         pr_err("failed to reclaim a page\n");
         goto out_unlock;
     }
+    count_event(region, RACK_DM_EVENT_RECLAIM_SLOW);
 
 success_reclaim:
     if (rpage->flags == RACK_DM_PAGE_IDLE) {
@@ -156,6 +174,8 @@ success_remap:
 
 success:
     spin_unlock(&rpage->lock);
+
+    background_reclaim(region);
 
     return VM_FAULT_NOPAGE;
 

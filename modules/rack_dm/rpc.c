@@ -581,6 +581,30 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
         c1++;
     }
 
+    list_for_each_entry(rpage, &region->inactive_list.head, head) {
+        if (rpage->remote_page) {
+            pg_node_hash = rpage->remote_page->conn->nodename_hash;
+            pg_vaddr = rpage->remote_page->remote_vaddr;
+            pg_paddr = rpage->remote_page->remote_paddr;
+            kfree(rpage->remote_page);
+            rpage->remote_page = NULL;
+            c2++;
+        } else {
+            pr_err("it should not be printed!!!\n");
+            pg_node_hash = local_node_hash;
+            pg_vaddr = (u64) rpage->buf;
+            pg_paddr = ib_dma_map_page(
+                    ib_dev, vmalloc_to_page(rpage->buf), 0, 4096,
+                    DMA_BIDIRECTIONAL);
+            c3++;
+        }
+        ((struct page_metadata *) rdma_buf + cnt)->index = rpage->index;
+        ((struct page_metadata *) rdma_buf + cnt)->hash  = pg_node_hash;
+        ((struct page_metadata *) rdma_buf + cnt)->vaddr = pg_vaddr;
+        ((struct page_metadata *) rdma_buf + cnt)->paddr = pg_paddr;
+        cnt++;
+    }
+
     list_for_each_entry(rpage, &region->active_list.head, head) {
         if (rpage->remote_page) {
             rack_dm_writeback(region, rpage);

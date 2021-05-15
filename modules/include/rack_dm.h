@@ -20,6 +20,10 @@ enum rack_dm_event {
     RACK_DM_EVENT_PGFAULT_WRITE,
     RACK_DM_EVENT_PGFAULT_COLLISION,
     RACK_DM_EVENT_PGFAULT_INACTIVE,
+    RACK_DM_EVENT_RECLAIM_FAST,
+    RACK_DM_EVENT_RECLAIM_SLOW,
+    RACK_DM_EVENT_BG_RECLAIM_TASK,
+    RACK_DM_EVENT_BG_RECLAIM,
     RACK_DM_EVENT_RDMA_READ,
     RACK_DM_EVENT_RDMA_WRITE,
     RACK_DM_EVENT_ALLOC_LOCAL_PAGE,
@@ -46,6 +50,10 @@ static const char * const rack_dm_events[] = {
     [RACK_DM_EVENT_PGFAULT_WRITE]           = "pgfualt_write",
     [RACK_DM_EVENT_PGFAULT_COLLISION]       = "pgfault_collision",
     [RACK_DM_EVENT_PGFAULT_INACTIVE]        = "pgfault_inactive",
+    [RACK_DM_EVENT_RECLAIM_FAST]            = "reclaim_fast",
+    [RACK_DM_EVENT_RECLAIM_SLOW]            = "reclaim_slow",
+    [RACK_DM_EVENT_BG_RECLAIM_TASK]         = "background_reclaim_task",
+    [RACK_DM_EVENT_BG_RECLAIM]              = "background_reclaim",
     [RACK_DM_EVENT_RDMA_READ]               = "rdma_read",
     [RACK_DM_EVENT_RDMA_WRITE]              = "rdma_write",
     [RACK_DM_EVENT_ALLOC_LOCAL_PAGE]        = "alloc_local_page",
@@ -113,6 +121,7 @@ struct rack_dm_region {
     u64 max_pages;
     atomic64_t page_count_limit;
     atomic64_t page_count;
+    bool full;
 
     struct rack_dm_page *pages;
     struct rack_dm_page_list active_list;
@@ -120,6 +129,7 @@ struct rack_dm_region {
     struct rack_dm_page_list remote_page_list;
 
     struct rack_dm_work remote_page_work;
+    struct rack_dm_work reclaim_work;
 
     struct vm_area_struct *vma;
     struct rack_dm_event_count __percpu *stat;
