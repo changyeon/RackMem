@@ -544,7 +544,7 @@ int krdma_send_rpc_request(struct krdma_conn *conn, struct krdma_msg *msg)
     }
 
     ret = wait_for_completion_timeout(
-            &msg->done, msecs_to_jiffies(100) + 1);
+            &msg->done, msecs_to_jiffies(10000) + 1);
     if (ret == 0) {
         pr_err("timeout in krdma_send_rpc_request id: %u\n", fmt->rpc_id);
         ret = -ETIMEDOUT;
