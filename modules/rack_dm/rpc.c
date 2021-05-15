@@ -427,12 +427,13 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
 {
     int ret = 0;
     u32 local_node_hash;
-    u64 i, j, cnt, size, vaddr, paddr, pg_node_hash, pg_vaddr, pg_paddr;
+    u64 i, cnt, size, vaddr, paddr, pg_node_hash, pg_vaddr, pg_paddr;
     void *rdma_buf;
     struct payload_fmt *payload;
     struct rack_dm_region *region;
     struct rack_dm_page *rpage;
     struct ib_device *ib_dev = (struct ib_device *) ctx;
+    u64 c1 = 0, c2 = 0, c3 = 0;
 
     DEBUG_LOG("[!!!] get_region_metadata_rpc_handler\n");
 
@@ -449,43 +450,49 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
 
     local_node_hash = krdma_local_node_hash();
     cnt = 0;
+
     for (i = 0; i < region->max_pages; i++) {
         rpage = &region->pages[i];
-        if (rpage->buf) {
-            /* The latest data stored in the local memory */
-            pg_node_hash = local_node_hash;
-            pg_vaddr = (u64) rpage->buf;
-            pg_paddr = ib_dma_map_page(ib_dev, vmalloc_to_page(rpage->buf),
-                                       0, 4096, DMA_BIDIRECTIONAL);
-            if (rpage->remote_page) {
-                /*
-                 *ret = free_remote_user_page(
-                 *        rpage->remote_page->conn, region->page_size,
-                 *        rpage->remote_page->remote_vaddr,
-                 *        rpage->remote_page->remote_paddr);
-                 *if (ret) {
-                 *    pr_err("error on free_remote_user_page\n");
-                 *    goto out_free_dma_buf;
-                 *}
-                 */
-                kfree(rpage->remote_page);
-                rpage->remote_page = NULL;
-            }
-        } else if (rpage->remote_page) {
-            /* The latest data is available at the remote memory */
+
+        if ((rpage->buf != NULL) || (rpage->remote_page == NULL))
+            continue;
+
+        pg_node_hash = rpage->remote_page->conn->nodename_hash;
+        pg_vaddr = rpage->remote_page->remote_vaddr;
+        pg_paddr = rpage->remote_page->remote_paddr;
+
+        ((struct page_metadata *) rdma_buf + cnt)->index = rpage->index;
+        ((struct page_metadata *) rdma_buf + cnt)->hash  = pg_node_hash;
+        ((struct page_metadata *) rdma_buf + cnt)->vaddr = pg_vaddr;
+        ((struct page_metadata *) rdma_buf + cnt)->paddr = pg_paddr;
+        cnt++;
+        c1++;
+    }
+
+    list_for_each_entry(rpage, &region->active_list.head, head) {
+        if (rpage->remote_page) {
+            rack_dm_writeback(region, rpage);
             pg_node_hash = rpage->remote_page->conn->nodename_hash;
             pg_vaddr = rpage->remote_page->remote_vaddr;
             pg_paddr = rpage->remote_page->remote_paddr;
+            kfree(rpage->remote_page);
+            rpage->remote_page = NULL;
+            c2++;
         } else {
-            /* This page never touched. Do not send metadata of this page  */
-            continue;
+            pg_node_hash = local_node_hash;
+            pg_vaddr = (u64) rpage->buf;
+            pg_paddr = ib_dma_map_page(
+                    ib_dev, vmalloc_to_page(rpage->buf), 0, 4096,
+                    DMA_BIDIRECTIONAL);
+            c3++;
         }
-        ((struct page_metadata *) rdma_buf + cnt)->index = i;
+        ((struct page_metadata *) rdma_buf + cnt)->index = rpage->index;
         ((struct page_metadata *) rdma_buf + cnt)->hash  = pg_node_hash;
         ((struct page_metadata *) rdma_buf + cnt)->vaddr = pg_vaddr;
         ((struct page_metadata *) rdma_buf + cnt)->paddr = pg_paddr;
         cnt++;
     }
+    pr_info("migration c1: %llu, c2: %llu, c3: %llu\n", c1, c2, c3);
 
     vaddr = (u64) rdma_buf;
     payload = (struct payload_fmt *) output;
@@ -497,15 +504,6 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
 
     return ret;
 
-out_free_dma_buf:
-    for (j = 0; j < i; j++) {
-        rpage = &region->pages[j];
-        if (rpage->buf) {
-            pg_paddr = ((struct page_metadata *) rdma_buf + j)->paddr;
-            ib_dma_unmap_page(ib_dev, paddr, size, DMA_BIDIRECTIONAL);
-        }
-    }
-    dma_free_coherent(ib_dev->dma_device, size, rdma_buf, paddr);
 out:
     return ret;
 }
@@ -590,22 +588,24 @@ int get_region_metadata(struct krdma_conn *conn,
             ib_dma_unmap_page(
                     conn->cm_id->device, pg_paddr, region->page_size,
                     DMA_BIDIRECTIONAL);
-            rpage->flags = RACK_DM_PAGE_INACTIVE;
-            rack_dm_page_list_add(&region->inactive_list, rpage);
+
+            /*
+             *rpage->flags = RACK_DM_PAGE_INACTIVE;
+             *rack_dm_page_list_add(&region->inactive_list, rpage);
+             */
+
+            ret = rack_dm_remap(
+                    region, rpage,
+                    region->vma->vm_start + pg_index * region->page_size,
+                    region->page_size);
+            if (ret) {
+                pr_err("failed to remap the page\n");
+                goto out_free_dma_buf;
+            }
 
             atomic64_fetch_add(1, &region->page_count);
             count_event(region, RACK_DM_EVENT_ALLOC_LOCAL_PAGE);
-            /*
-             *ret = rack_dm_remap(region, rpage,
-             *                    region->vma->vm_start + i * region->page_size,
-             *                    region->page_size);
-             */
-            /*
-             *if (ret) {
-             *    pr_err("failed to remap the page\n");
-             *    goto out_free_dma_buf;
-             *}
-             */
+
             DEBUG_LOG("[***] (restore local page) index: %llu, vaddr: %llu, "
                       "paddr: %llu\n", pg_index, pg_vaddr, pg_paddr);
         } else {
