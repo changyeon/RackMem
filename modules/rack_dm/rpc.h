@@ -13,4 +13,3 @@ enum rack_dm_rpc {
 };
 
 #endif /* _RACK_DM_RPC_H_ */
-

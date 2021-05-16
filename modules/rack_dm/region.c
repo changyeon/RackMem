@@ -279,7 +279,6 @@ out:
 
 void *rack_dm_reclaim_inactive(struct rack_dm_region *region)
 {
-    int ret;
     void *buf = NULL;
     struct rack_dm_page *rpage;
 
@@ -289,12 +288,6 @@ void *rack_dm_reclaim_inactive(struct rack_dm_region *region)
         spin_lock(&rpage->lock);
         if (likely(rpage->flags & RACK_DM_PAGE_INACTIVE)) {
             count_event(region, RACK_DM_EVENT_RECLAIM_INACTIVE);
-            ret = rack_dm_writeback(region, rpage);
-            if (ret) {
-                pr_err("error on rack_dm_writeback: %p\n", rpage);
-                rpage->flags = RACK_DM_PAGE_ERROR;
-                goto out;
-            }
             buf = rpage->buf;
             rpage->buf = NULL;
             rpage->flags = RACK_DM_PAGE_NOT_PRESENT;
@@ -306,7 +299,6 @@ void *rack_dm_reclaim_inactive(struct rack_dm_region *region)
         spin_unlock(&rpage->lock);
     }
 
-out:
     return buf;
 }
 
