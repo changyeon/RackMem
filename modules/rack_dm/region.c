@@ -410,7 +410,7 @@ static void reclaim_active_pages(struct work_struct *ws)
 
     count_event(region, RACK_DM_EVENT_BG_RECLAIM_TASK);
 
-    for (i = 0; i < 1024; i++) {
+    for (i = 0; i < 16384; i++) {
         rpage = rack_dm_page_list_pop(&region->active_list);
         if (rpage == NULL) {
             pr_err("failed to reclaim a page from active_list\n");
@@ -477,7 +477,7 @@ struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
     rack_dm_page_list_init(&region->remote_page_list);
 
     region->remote_page_work.region = region;
-    INIT_WORK(&region->remote_page_work.ws, refill_remote_page_list);
+    INIT_WORK(&region->remote_page_work.ws, refill_remote_page_list_bulk);
 
     region->reclaim_work.region = region;
     INIT_WORK(&region->reclaim_work.ws, reclaim_active_pages);

@@ -108,6 +108,7 @@ static int alloc_remote_user_page_rpc_handler(void *input, void *output,
     buf = vmalloc_user(size);
     if (buf == NULL) {
         pr_err("failed to allocate memory for remote_page buf\n");
+        ret = -ENOMEM;
         goto out;
     }
 
@@ -154,6 +155,53 @@ void refill_remote_page_list(struct work_struct *ws)
     }
 
     count_event(region, RACK_DM_EVENT_REMOTE_PAGE_REFILL);
+}
+
+void refill_remote_page_list_bulk(struct work_struct *ws)
+{
+    struct rack_dm_work *work;
+    struct rack_dm_region *region;
+    struct rack_dm_page_list *remote_page_list;
+    struct remote_page **remote_page_array;
+    int i, j, ret;
+
+    work = container_of(ws, struct rack_dm_work, ws);
+    region = work->region;
+    remote_page_list = &region->remote_page_list;
+
+    remote_page_array = (struct remote_page **) vmalloc(
+            250 * sizeof(struct remote_page *));
+    if (remote_page_array == NULL) {
+        pr_err("failed to allocate memory for remote_page_array\n");
+        return;
+    }
+
+    for (i = 0; i < 64; i++) {
+        memset(remote_page_array, 0x0, 250 * sizeof(struct remote_page *));
+        for (j = 0; j < 250; j++) {
+            remote_page_array[j] = kzalloc(
+                    sizeof(struct remote_page), GFP_KERNEL);
+            if (remote_page_array[j] == NULL) {
+                pr_err("failed to allocate memory for struct remote_page\n");
+                goto out;
+            }
+        }
+        ret = alloc_remote_page_bulk(region, remote_page_array, 250);
+        if (ret) {
+            pr_err("error on alloc_remote_page_bulk\n");
+            goto out;
+        }
+        spin_lock(&remote_page_list->lock);
+        for (j = 0; j < 250; j++) {
+            list_add_tail(&remote_page_array[j]->head, &remote_page_list->head);
+            remote_page_list->size++;
+        }
+        spin_unlock(&remote_page_list->lock);
+    }
+
+out:
+    vfree(remote_page_array);
+    count_event(region, RACK_DM_EVENT_REMOTE_PAGE_REFILL_BULK);
 }
 
 int alloc_remote_page(struct rack_dm_region *region,
@@ -376,6 +424,114 @@ out_free_msg:
     krdma_free_msg(conn, send_msg);
 out:
     return ret;
+}
+
+struct remote_page_info {
+    u64 vaddr;
+    u64 paddr;
+};
+
+static int alloc_remote_page_bulk_rpc_handler(void *input, void *output,
+                                              void *ctx)
+{
+    int ret = 0;
+    u64 i, n;
+    void *buf;
+    struct ib_device *ib_dev = (struct ib_device *) ctx;
+    struct payload_fmt *payload;
+    struct remote_page_info *info;
+
+    payload = (struct payload_fmt *) input;
+    n = payload->arg1;
+
+    info = (struct remote_page_info *) output;
+    for (i = 0; i < n; i++) {
+        buf = vmalloc_user(PAGE_SIZE);
+        if (buf == NULL) {
+            pr_err("failed to allocate memory for remote_page buf\n");
+            ret = -ENOMEM;
+            goto out;
+        }
+        info[i].vaddr = (u64) buf;
+        info[i].paddr = ib_dma_map_page(
+                ib_dev, vmalloc_to_page(buf), 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
+
+        DEBUG_LOG("alloc_remote_page_bulk_rpc_handler vaddr: %llu, paddr: %llu "
+                  "(%p)\n", info[i].vaddr, info[i].paddr, ib_dev);
+    }
+    ret = n * 2UL * sizeof(u64);
+
+out:
+    return ret;
+}
+
+int alloc_remote_page_bulk(struct rack_dm_region *region,
+                           struct remote_page **remote_page_array, int n)
+{
+    int i, ret = 0;
+    struct remote_page *remote_page;
+    struct rack_dm_node *node;
+    struct krdma_msg *send_msg;
+    struct rpc_msg_fmt *fmt;
+    struct remote_page_info *info;
+
+    node = get_node_round_robin();
+    if (node == NULL) {
+        pr_err("error on get_node_round_robin\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    send_msg = krdma_alloc_msg(node->conn, 4096);
+    if (send_msg == NULL) {
+        pr_err("error on krdma_alloc_msg\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    fmt = (struct rpc_msg_fmt *) send_msg->vaddr;
+    fmt->cmd = KRDMA_CMD_GENERAL_RPC_REQUEST;
+    fmt->rpc_id = RACK_DM_RPC_ALLOC_REMOTE_PAGE_BULK;
+
+    fmt->payload = (u64) n;
+    fmt->size = sizeof(u64);
+
+    ret = krdma_send_rpc_request(node->conn, send_msg);
+    if (ret) {
+        pr_err("error on krdma_send_rpc_request\n");
+        goto out_free_msg;
+    }
+
+    if (fmt->ret < 0) {
+        pr_err("failed rpc request %d\n", fmt->rpc_id);
+        goto out_free_msg;
+    }
+
+    info = (struct remote_page_info *) &fmt->payload;
+    for (i = 0; i < n; i++) {
+        remote_page = remote_page_array[i];
+        remote_page->conn = node->conn;
+        remote_page->remote_vaddr = info[i].vaddr;
+        remote_page->remote_paddr = info[i].paddr;
+        INIT_LIST_HEAD(&remote_page->head);
+    }
+
+out_free_msg:
+    krdma_free_msg(node->conn, send_msg);
+out:
+    return ret;
+}
+
+static int free_remote_page_bulk_rpc_handler(void *input, void *output,
+                                             void *ctx)
+{
+    return 0;
+}
+
+int free_remote_page_bulk(struct rack_dm_region *region,
+                          struct rack_dm_page *rpage)
+{
+    return 0;
 }
 
 static int alloc_remote_memory_rpc_handler(void *input, void *output,
@@ -890,12 +1046,30 @@ int rack_dm_setup_rpc(void)
         goto out_unregister_alloc_remote_user_page;
     }
 
+    rpc_id = RACK_DM_RPC_ALLOC_REMOTE_PAGE_BULK;
+    ret = krdma_register_rpc(rpc_id, alloc_remote_page_bulk_rpc_handler,
+                             ib_dev);
+    if (ret) {
+        pr_err("failed to register rack_dm rpc %d\n", rpc_id);
+        ret = -EINVAL;
+        goto out_unregister_free_remote_user_page;
+    }
+
+    rpc_id = RACK_DM_RPC_FREE_REMOTE_PAGE_BULK;
+    ret = krdma_register_rpc(rpc_id, free_remote_page_bulk_rpc_handler,
+                             ib_dev);
+    if (ret) {
+        pr_err("failed to register rack_dm rpc %d\n", rpc_id);
+        ret = -EINVAL;
+        goto out_unregister_alloc_remote_page_bulk;
+    }
+
     rpc_id = RACK_DM_RPC_ALLOC_REMOTE_MEMORY;
     ret = krdma_register_rpc(rpc_id, alloc_remote_memory_rpc_handler, ib_dev);
     if (ret) {
         pr_err("failed to register rack_dm rpc %d\n", rpc_id);
         ret = -EINVAL;
-        goto out_unregister_free_remote_user_page;
+        goto out_unregister_free_remote_page_bulk;
     }
 
     rpc_id = RACK_DM_RPC_FREE_REMOTE_MEMORY;
@@ -930,6 +1104,10 @@ out_unregister_free_remote_memory:
     krdma_unregister_rpc(RACK_DM_RPC_FREE_REMOTE_MEMORY);
 out_unregister_alloc_remote_memory:
     krdma_unregister_rpc(RACK_DM_RPC_ALLOC_REMOTE_MEMORY);
+out_unregister_free_remote_page_bulk:
+    krdma_unregister_rpc(RACK_DM_RPC_FREE_REMOTE_PAGE_BULK);
+out_unregister_alloc_remote_page_bulk:
+    krdma_unregister_rpc(RACK_DM_RPC_ALLOC_REMOTE_PAGE_BULK);
 out_unregister_free_remote_user_page:
     krdma_unregister_rpc(RACK_DM_RPC_FREE_REMOTE_USER_PAGE);
 out_unregister_alloc_remote_user_page:

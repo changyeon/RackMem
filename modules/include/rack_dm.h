@@ -31,6 +31,7 @@ enum rack_dm_event {
     RACK_DM_EVENT_ALLOC_REMOTE_PAGE_FAST,
     RACK_DM_EVENT_ALLOC_REMOTE_PAGE_SLOW,
     RACK_DM_EVENT_REMOTE_PAGE_REFILL,
+    RACK_DM_EVENT_REMOTE_PAGE_REFILL_BULK,
     RACK_DM_EVENT_FREE_REMOTE_PAGE,
     RACK_DM_EVENT_RECLAIM_INACTIVE,
     RACK_DM_EVENT_RECLAIM_INACTIVE_MISS,
@@ -61,6 +62,7 @@ static const char * const rack_dm_events[] = {
     [RACK_DM_EVENT_ALLOC_REMOTE_PAGE_FAST]  = "alloc_remote_page_fast",
     [RACK_DM_EVENT_ALLOC_REMOTE_PAGE_SLOW]  = "alloc_remote_page_slow",
     [RACK_DM_EVENT_REMOTE_PAGE_REFILL]      = "remote_page_refill",
+    [RACK_DM_EVENT_REMOTE_PAGE_REFILL_BULK] = "remote_page_refill_bulk",
     [RACK_DM_EVENT_FREE_REMOTE_PAGE]        = "free_remote_page",
     [RACK_DM_EVENT_RECLAIM_INACTIVE]        = "reclaim_inactive",
     [RACK_DM_EVENT_RECLAIM_INACTIVE_MISS]   = "reclaim_inactive_miss",
@@ -160,11 +162,14 @@ void rack_dm_free_region(struct rack_dm_region *region);
 void rack_dm_migrate_clean_up_region(struct rack_dm_region *region);
 int rack_dm_rdma(struct krdma_conn *conn, u64 local_dma_addr, u64 remote_dma_addr, u64 size, int dir);
 void refill_remote_page_list(struct work_struct *ws);
+void refill_remote_page_list_bulk(struct work_struct *ws);
 
 /* remote memory */
-int alloc_remote_user_page(struct rack_dm_region *region, struct rack_dm_page *rpage);
 int alloc_remote_page(struct rack_dm_region *region, struct remote_page *remote_page);
+int alloc_remote_user_page(struct rack_dm_region *region, struct rack_dm_page *rpage);
 int free_remote_user_page(struct krdma_conn *conn, u64 size, u64 remote_vaddr, u64 remote_paddr);
+int alloc_remote_page_bulk(struct rack_dm_region *region, struct remote_page **remote_page_array, int n);
+int free_remote_page_bulk(struct rack_dm_region *region, struct rack_dm_page *rpage);
 int update_rdma_node_list(void);
 void free_rdma_node_list(void);
 
