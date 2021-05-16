@@ -26,6 +26,17 @@ static int rack_dm_stat_print(struct seq_file *f, void *v)
     for (i = 0; i < __NR_RACK_DM_EVENTS; i++)
         seq_printf(f, "%s: %llu\n", rack_dm_events[i], sum[i]);
 
+    seq_printf(f, "region_size: %llu\n", region->size);
+    seq_printf(f, "region_page_size: %llu\n", region->page_size);
+    seq_printf(f, "page_count: %lld\n", atomic64_read(&region->page_count));
+    seq_printf(f, "page_count_limit: %lld\n",
+            atomic64_read(&region->page_count_limit));
+    seq_printf(f, "full: %d\n", region->full);
+    seq_printf(f, "active_list_size: %d\n",
+            rack_dm_page_list_size(&region->active_list));
+    seq_printf(f, "inactive_list_size: %d\n",
+            rack_dm_page_list_size(&region->inactive_list));
+
     return 0;
 }
 

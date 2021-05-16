@@ -76,17 +76,9 @@ void rack_dm_close(struct vm_area_struct *vma)
 
 static inline void background_reclaim(struct rack_dm_region *region)
 {
-    bool reclaim = false;
-
-    if (region->full) {
-        spin_lock(&region->inactive_list.lock);
-        if (region->inactive_list.size < 1024)
-            reclaim = true;
-        spin_unlock(&region->inactive_list.lock);
-
-        if (reclaim)
+    if (region->full)
+        if (rack_dm_page_list_size(&region->inactive_list) < 1024)
             schedule_work(&region->reclaim_work.ws);
-    }
 }
 
 vm_fault_t rack_dm_fault(struct vm_fault *vmf)
