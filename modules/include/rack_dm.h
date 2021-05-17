@@ -24,6 +24,8 @@ enum rack_dm_event {
     RACK_DM_EVENT_RECLAIM_SLOW,
     RACK_DM_EVENT_BG_RECLAIM_TASK,
     RACK_DM_EVENT_BG_RECLAIM,
+    RACK_DM_EVENT_BG_RECLAIM_PRECOPY,
+    RACK_DM_EVENT_PRECOPY_TASK,
     RACK_DM_EVENT_RDMA_READ,
     RACK_DM_EVENT_RDMA_WRITE,
     RACK_DM_EVENT_ALLOC_LOCAL_PAGE,
@@ -55,6 +57,8 @@ static const char * const rack_dm_events[] = {
     [RACK_DM_EVENT_RECLAIM_SLOW]            = "reclaim_slow",
     [RACK_DM_EVENT_BG_RECLAIM_TASK]         = "background_reclaim_task",
     [RACK_DM_EVENT_BG_RECLAIM]              = "background_reclaim",
+    [RACK_DM_EVENT_BG_RECLAIM_PRECOPY]      = "background_reclaim_precopy",
+    [RACK_DM_EVENT_PRECOPY_TASK]            = "precopy_task",
     [RACK_DM_EVENT_RDMA_READ]               = "rdma_read",
     [RACK_DM_EVENT_RDMA_WRITE]              = "rdma_write",
     [RACK_DM_EVENT_ALLOC_LOCAL_PAGE]        = "alloc_local_page",
@@ -112,6 +116,8 @@ struct rack_dm_page {
 struct rack_dm_work {
     struct work_struct ws;
     struct rack_dm_region *region;
+    char target_node[64];
+    unsigned long nr_pages;
 };
 
 struct rack_dm_region {
@@ -132,12 +138,14 @@ struct rack_dm_region {
 
     struct rack_dm_work remote_page_work;
     struct rack_dm_work reclaim_work;
+    struct rack_dm_work precopy_work;
 
     struct vm_area_struct *vma;
     struct rack_dm_event_count __percpu *stat;
 
     struct dentry *dbgfs_root;
     struct dentry *dbgfs_stat;
+    struct dentry *dbgfs_precopy;
 
     spinlock_t lock;
 };
@@ -166,7 +174,7 @@ void refill_remote_page_list_bulk(struct work_struct *ws);
 
 /* remote memory */
 int alloc_remote_page(struct rack_dm_region *region, struct remote_page *remote_page);
-int alloc_remote_user_page(struct rack_dm_region *region, struct rack_dm_page *rpage);
+int alloc_remote_user_page(struct rack_dm_region *region, struct rack_dm_page *rpage, char *target_node);
 int free_remote_user_page(struct krdma_conn *conn, u64 size, u64 remote_vaddr, u64 remote_paddr);
 int alloc_remote_page_bulk(struct rack_dm_region *region, struct remote_page **remote_page_array, int n);
 int free_remote_page_bulk(struct rack_dm_region *region, struct rack_dm_page *rpage);

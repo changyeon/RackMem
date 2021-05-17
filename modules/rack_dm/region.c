@@ -50,7 +50,6 @@ struct rack_dm_page *rack_dm_page_list_pop(struct rack_dm_page_list *page_list)
     rpage = list_first_entry(&page_list->head, struct rack_dm_page, head);
     list_del_init(&rpage->head);
     page_list->size--;
-
     spin_unlock(&page_list->lock);
 
     return rpage;
@@ -180,8 +179,7 @@ out:
     return ret;
 }
 
-int rack_dm_writeback(struct rack_dm_region *region,
-                      struct rack_dm_page *rpage)
+int rack_dm_writeback(struct rack_dm_region *region, struct rack_dm_page *rpage)
 {
     int ret;
     u64 local_dma_addr;
@@ -190,7 +188,7 @@ int rack_dm_writeback(struct rack_dm_region *region,
               rpage->index);
 
     if (rpage->remote_page == NULL) {
-        ret = alloc_remote_user_page(region, rpage);
+        ret = alloc_remote_user_page(region, rpage, NULL);
         if (ret) {
             pr_err("error on alloc_remote_page\n");
             goto out;
@@ -424,6 +422,47 @@ static void reclaim_active_pages(struct work_struct *ws)
     }
 }
 
+static void precopy_active_pages(struct work_struct *ws)
+{
+    int ret;
+    struct rack_dm_work *work;
+    struct rack_dm_region *region;
+    char *target_node;
+    unsigned long nr_pages, i;
+    struct rack_dm_page *rpage;
+
+    work = container_of(ws, struct rack_dm_work, ws);
+    region = work->region;
+    target_node = work->target_node;
+    nr_pages = work->nr_pages;
+
+    for (i = 0; i < nr_pages; i++) {
+        rpage = rack_dm_page_list_pop(&region->active_list);
+        if (rpage == NULL) {
+            pr_err("failed to reclaim a page from active_list\n");
+            break;
+        }
+        spin_lock(&rpage->lock);
+        rack_dm_unmap(region, rpage);
+        ret = rack_dm_writeback(region, rpage);
+        if (ret) {
+            pr_err("error on rack_dm_writeback: %p\n", rpage);
+            rpage->flags = RACK_DM_PAGE_ERROR;
+            spin_unlock(&rpage->lock);
+            break;
+        }
+        rack_dm_page_list_add(&region->inactive_list, rpage);
+        spin_unlock(&rpage->lock);
+
+        count_event(region, RACK_DM_EVENT_BG_RECLAIM_PRECOPY);
+    }
+
+    pr_info("precopy_active_pages target_node: %s, nr_pages: %lu\n",
+            target_node, nr_pages);
+
+    count_event(region, RACK_DM_EVENT_PRECOPY_TASK);
+}
+
 struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
 {
     u64 i, total_size_bytes;
@@ -473,6 +512,9 @@ struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
 
     region->reclaim_work.region = region;
     INIT_WORK(&region->reclaim_work.ws, reclaim_active_pages);
+
+    region->precopy_work.region = region;
+    INIT_WORK(&region->precopy_work.ws, precopy_active_pages);
 
     region->stat = alloc_percpu(struct rack_dm_event_count);
     if (region->stat == NULL) {
@@ -557,7 +599,7 @@ void rack_dm_free_region(struct rack_dm_region *region)
     free_percpu(region->stat);
     vfree(region->pages);
     kfree(region);
-};
+}
 
 void rack_dm_migrate_clean_up_region(struct rack_dm_region *region)
 {
@@ -576,4 +618,4 @@ void rack_dm_migrate_clean_up_region(struct rack_dm_region *region)
     free_percpu(region->stat);
     vfree(region->pages);
     kfree(region);
-};
+}

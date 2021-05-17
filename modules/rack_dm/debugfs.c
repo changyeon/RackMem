@@ -1,7 +1,13 @@
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 
 #include "debugfs.h"
+
+extern int g_debug;
+
+#define DEBUG_LOG if (g_debug) pr_info
 
 struct dentry *dbgfs_root = NULL;
 
@@ -63,6 +69,37 @@ static const struct file_operations fops_stat = {
     .release = single_release
 };
 
+static ssize_t debugfs_precopy(struct file *file, const char __user *buf,
+                               size_t len, loff_t *ppos)
+{
+    ssize_t ret;
+    struct dentry *dentry_root;
+    struct rack_dm_region_dbgfs *region_dbgfs;
+    struct rack_dm_region *region;
+
+    char cmd_buf[64] = {0};
+    char target_node[64] = {0};
+    unsigned long nr_pages = 0;
+
+    dentry_root = file->f_path.dentry->d_parent;
+    region_dbgfs = dentry_root->d_inode->i_private;
+    region = region_dbgfs->region;
+
+    ret = simple_write_to_buffer(cmd_buf, len, ppos, buf, 64);
+
+    sscanf(cmd_buf, "%s %lu\n", target_node, &nr_pages);
+
+    strcpy(region->precopy_work.target_node, target_node);
+    region->precopy_work.nr_pages = nr_pages;
+    schedule_work(&region->precopy_work.ws);
+
+    return ret;
+}
+
+static const struct file_operations fops_precopy = {
+    .write = debugfs_precopy,
+};
+
 int rack_dm_debugfs_add_region(struct rack_dm_region *region)
 {
     int ret;
@@ -93,6 +130,14 @@ int rack_dm_debugfs_add_region(struct rack_dm_region *region)
             "stat", 0440, region->dbgfs_root, NULL, &fops_stat);
     if (region->dbgfs_stat == NULL) {
         pr_err("failed to create region debugfs: stat\n");
+        ret = -EINVAL;
+        goto out_destroy_dbgfs;
+    }
+
+    region->dbgfs_precopy = debugfs_create_file(
+            "precopy", 0660, region->dbgfs_root, NULL, &fops_precopy);
+    if (region->dbgfs_precopy == NULL) {
+        pr_err("failed to create region debugfs: precopy\n");
         ret = -EINVAL;
         goto out_destroy_dbgfs;
     }

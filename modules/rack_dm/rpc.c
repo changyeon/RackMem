@@ -73,7 +73,7 @@ static void rack_dm_destroy_node_list(void)
     spin_unlock(&node_list_lock);
 }
 
-static struct rack_dm_node *get_node_round_robin(void)
+static struct krdma_conn *get_node_round_robin(void)
 {
     struct rack_dm_node *node = NULL;
 
@@ -87,7 +87,7 @@ static struct rack_dm_node *get_node_round_robin(void)
     list_rotate_left(&node_list);
     spin_unlock(&node_list_lock);
 
-    return node;
+    return node->conn;
 
 out:
     return NULL;
@@ -208,20 +208,20 @@ int alloc_remote_page(struct rack_dm_region *region,
                       struct remote_page *remote_page)
 {
     int ret;
-    struct rack_dm_node *node;
+    struct krdma_conn *conn;
     struct krdma_msg *send_msg;
     struct rpc_msg_fmt *fmt;
     struct payload_fmt *payload;
 
     /* slow path */
-    node = get_node_round_robin();
-    if (node == NULL) {
+    conn = get_node_round_robin();
+    if (conn == NULL) {
         pr_err("error on get_node_round_robin\n");
         ret = -EINVAL;
         goto out_free_remote_page;
     }
 
-    send_msg = krdma_alloc_msg(node->conn, 4096);
+    send_msg = krdma_alloc_msg(conn, 4096);
     if (send_msg == NULL) {
         pr_err("error on krdma_alloc_msg\n");
         ret = -EINVAL;
@@ -235,7 +235,7 @@ int alloc_remote_page(struct rack_dm_region *region,
     fmt->payload = region->page_size;
     fmt->size = sizeof(u64);
 
-    ret = krdma_send_rpc_request(node->conn, send_msg);
+    ret = krdma_send_rpc_request(conn, send_msg);
     if (ret) {
         pr_err("error on krdma_send_rpc_request\n");
         goto out_free_msg;
@@ -247,28 +247,28 @@ int alloc_remote_page(struct rack_dm_region *region,
     }
 
     payload = (struct payload_fmt *) &fmt->payload;
-    remote_page->conn = node->conn;
+    remote_page->conn = conn;
     remote_page->remote_vaddr = payload->arg1;
     remote_page->remote_paddr = payload->arg2;
     INIT_LIST_HEAD(&remote_page->head);
 
-    krdma_free_msg(node->conn, send_msg);
+    krdma_free_msg(conn, send_msg);
 
     return 0;
 
 out_free_msg:
-    krdma_free_msg(node->conn, send_msg);
+    krdma_free_msg(conn, send_msg);
 out_free_remote_page:
     kfree(remote_page);
     return ret;
 }
 
 int alloc_remote_user_page(struct rack_dm_region *region,
-                           struct rack_dm_page *rpage)
+                           struct rack_dm_page *rpage, char *target_node)
 {
     int ret;
     struct remote_page *remote_page = NULL;
-    struct rack_dm_node *node;
+    struct krdma_conn *conn;
     struct krdma_msg *send_msg;
     struct rpc_msg_fmt *fmt;
     struct payload_fmt *payload;
@@ -301,14 +301,18 @@ int alloc_remote_user_page(struct rack_dm_region *region,
         goto out;
     }
 
-    node = get_node_round_robin();
-    if (node == NULL) {
-        pr_err("error on get_node_round_robin\n");
+    if (target_node == NULL)
+        conn = get_node_round_robin();
+    else
+        conn = krdma_get_node_by_name(target_node);
+
+    if (conn == NULL) {
+        pr_err("failed to get node %s\n", target_node);
         ret = -EINVAL;
         goto out_free_remote_page;
     }
 
-    send_msg = krdma_alloc_msg(node->conn, 4096);
+    send_msg = krdma_alloc_msg(conn, 4096);
     if (send_msg == NULL) {
         pr_err("error on krdma_alloc_msg\n");
         ret = -EINVAL;
@@ -322,7 +326,7 @@ int alloc_remote_user_page(struct rack_dm_region *region,
     fmt->payload = region->page_size;
     fmt->size = sizeof(u64);
 
-    ret = krdma_send_rpc_request(node->conn, send_msg);
+    ret = krdma_send_rpc_request(conn, send_msg);
     if (ret) {
         pr_err("error on krdma_send_rpc_request\n");
         goto out_free_msg;
@@ -334,12 +338,12 @@ int alloc_remote_user_page(struct rack_dm_region *region,
     }
 
     payload = (struct payload_fmt *) &fmt->payload;
-    remote_page->conn = node->conn;
+    remote_page->conn = conn;
     remote_page->remote_vaddr = payload->arg1;
     remote_page->remote_paddr = payload->arg2;
     INIT_LIST_HEAD(&remote_page->head);
 
-    krdma_free_msg(node->conn, send_msg);
+    krdma_free_msg(conn, send_msg);
     count_event(region, RACK_DM_EVENT_ALLOC_REMOTE_PAGE_SLOW);
 
 success:
@@ -348,7 +352,7 @@ success:
     return 0;
 
 out_free_msg:
-    krdma_free_msg(node->conn, send_msg);
+    krdma_free_msg(conn, send_msg);
 out_free_remote_page:
     kfree(remote_page);
 out:
@@ -470,19 +474,19 @@ int alloc_remote_page_bulk(struct rack_dm_region *region,
 {
     int i, ret = 0;
     struct remote_page *remote_page;
-    struct rack_dm_node *node;
+    struct krdma_conn *conn;
     struct krdma_msg *send_msg;
     struct rpc_msg_fmt *fmt;
     struct remote_page_info *info;
 
-    node = get_node_round_robin();
-    if (node == NULL) {
+    conn = get_node_round_robin();
+    if (conn == NULL) {
         pr_err("error on get_node_round_robin\n");
         ret = -EINVAL;
         goto out;
     }
 
-    send_msg = krdma_alloc_msg(node->conn, 4096);
+    send_msg = krdma_alloc_msg(conn, 4096);
     if (send_msg == NULL) {
         pr_err("error on krdma_alloc_msg\n");
         ret = -EINVAL;
@@ -496,7 +500,7 @@ int alloc_remote_page_bulk(struct rack_dm_region *region,
     fmt->payload = (u64) n;
     fmt->size = sizeof(u64);
 
-    ret = krdma_send_rpc_request(node->conn, send_msg);
+    ret = krdma_send_rpc_request(conn, send_msg);
     if (ret) {
         pr_err("error on krdma_send_rpc_request\n");
         goto out_free_msg;
@@ -510,14 +514,14 @@ int alloc_remote_page_bulk(struct rack_dm_region *region,
     info = (struct remote_page_info *) &fmt->payload;
     for (i = 0; i < n; i++) {
         remote_page = remote_page_array[i];
-        remote_page->conn = node->conn;
+        remote_page->conn = conn;
         remote_page->remote_vaddr = info[i].vaddr;
         remote_page->remote_paddr = info[i].paddr;
         INIT_LIST_HEAD(&remote_page->head);
     }
 
 out_free_msg:
-    krdma_free_msg(node->conn, send_msg);
+    krdma_free_msg(conn, send_msg);
 out:
     return ret;
 }
@@ -1007,7 +1011,7 @@ out:
 int rack_dm_setup_rpc(void)
 {
     int ret;
-    struct rack_dm_node *node;
+    struct krdma_conn *conn;
     struct ib_device *ib_dev;
     u32 rpc_id;
 
@@ -1020,14 +1024,14 @@ int rack_dm_setup_rpc(void)
         goto out;
     }
 
-    node = get_node_round_robin();
-    if (node == NULL) {
+    conn = get_node_round_robin();
+    if (conn == NULL) {
         pr_err("error on get_node_round_robin\n");
         ret = -EINVAL;
         goto out;
     }
 
-    ib_dev = node->conn->cm_id->device;
+    ib_dev = conn->cm_id->device;
 
     rpc_id = RACK_DM_RPC_ALLOC_REMOTE_USER_PAGE;
     ret = krdma_register_rpc(rpc_id, alloc_remote_user_page_rpc_handler,
