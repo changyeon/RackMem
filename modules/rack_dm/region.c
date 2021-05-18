@@ -468,7 +468,7 @@ static void prefetch_active_pages(struct work_struct *ws)
     int ret;
     struct rack_dm_work *work;
     struct rack_dm_region *region;
-    unsigned long i, nr_pages, fault_address;
+    unsigned long i, nr_pages, fault_address, cnt;
     u64 *prefetch_pages;
     struct rack_dm_page *rpage;
 
@@ -480,8 +480,9 @@ static void prefetch_active_pages(struct work_struct *ws)
     pr_info("prefetch_active_pages nr_pages: %lu, arr: %p\n",
             nr_pages, prefetch_pages);
 
+    cnt = 0;
     for (i = 0; i < nr_pages; i++) {
-        rpage = &region->pages[prefetch_pages[i]];
+        rpage = &region->pages[prefetch_pages[nr_pages - (i + 1)]];
         spin_lock(&rpage->lock);
         if (rpage->flags != RACK_DM_PAGE_NOT_PRESENT) {
             spin_unlock(&rpage->lock);
@@ -510,11 +511,12 @@ static void prefetch_active_pages(struct work_struct *ws)
         }
         spin_unlock(&rpage->lock);
         count_event(region, RACK_DM_EVENT_PREFETCH_MIGRATION);
+        cnt++;
     }
 
     vfree(prefetch_pages);
-
     count_event(region, RACK_DM_EVENT_PREFETCH_TASK);
+    pr_info("prefetch_active_pages finished: %lu\n", cnt);
 }
 
 struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
