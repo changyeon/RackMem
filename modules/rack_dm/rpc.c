@@ -705,14 +705,14 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
     struct rack_dm_region *region;
     struct rack_dm_page *rpage;
     struct ib_device *ib_dev = (struct ib_device *) ctx;
-    u64 c1 = 0, c2 = 0, c3 = 0;
+    u64 remote_cnt = 0, inactive_cnt = 0, active_cnt = 0;
 
     DEBUG_LOG("[!!!] get_region_metadata_rpc_handler\n");
 
     payload = (struct payload_fmt *) input;
     region = (struct rack_dm_region *) payload->arg1;
 
-    size = region->max_pages * sizeof(struct page_metadata);
+    size = (region->max_pages + 1) * sizeof(struct page_metadata);
     rdma_buf = dma_alloc_coherent(ib_dev->dma_device, size, &paddr, GFP_KERNEL);
     if (rdma_buf == NULL) {
         pr_err("failed to allocate memory for region metadata buffer\n");
@@ -721,7 +721,7 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
     }
 
     local_node_hash = krdma_local_node_hash();
-    cnt = 0;
+    cnt = 1;
 
     for (i = 0; i < region->max_pages; i++) {
         rpage = &region->pages[i];
@@ -738,7 +738,7 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
         ((struct page_metadata *) rdma_buf + cnt)->vaddr = pg_vaddr;
         ((struct page_metadata *) rdma_buf + cnt)->paddr = pg_paddr;
         cnt++;
-        c1++;
+        remote_cnt++;
     }
 
     list_for_each_entry(rpage, &region->inactive_list.head, head) {
@@ -748,7 +748,6 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
             pg_paddr = rpage->remote_page->remote_paddr;
             kfree(rpage->remote_page);
             rpage->remote_page = NULL;
-            c2++;
         } else {
             pr_err("it should not be printed!!!\n");
             pg_node_hash = local_node_hash;
@@ -756,12 +755,12 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
             pg_paddr = ib_dma_map_page(
                     ib_dev, vmalloc_to_page(rpage->buf), 0, 4096,
                     DMA_BIDIRECTIONAL);
-            c3++;
         }
         ((struct page_metadata *) rdma_buf + cnt)->index = rpage->index;
         ((struct page_metadata *) rdma_buf + cnt)->hash  = pg_node_hash;
         ((struct page_metadata *) rdma_buf + cnt)->vaddr = pg_vaddr;
         ((struct page_metadata *) rdma_buf + cnt)->paddr = pg_paddr;
+        inactive_cnt++;
         cnt++;
     }
 
@@ -773,22 +772,26 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
             pg_paddr = rpage->remote_page->remote_paddr;
             kfree(rpage->remote_page);
             rpage->remote_page = NULL;
-            c2++;
         } else {
             pg_node_hash = local_node_hash;
             pg_vaddr = (u64) rpage->buf;
             pg_paddr = ib_dma_map_page(
                     ib_dev, vmalloc_to_page(rpage->buf), 0, 4096,
                     DMA_BIDIRECTIONAL);
-            c3++;
         }
         ((struct page_metadata *) rdma_buf + cnt)->index = rpage->index;
         ((struct page_metadata *) rdma_buf + cnt)->hash  = pg_node_hash;
         ((struct page_metadata *) rdma_buf + cnt)->vaddr = pg_vaddr;
         ((struct page_metadata *) rdma_buf + cnt)->paddr = pg_paddr;
+        active_cnt++;
         cnt++;
     }
-    pr_info("migration c1: %llu, c2: %llu, c3: %llu\n", c1, c2, c3);
+    pr_info("migration remote: %llu, inactive: %llu, active: %llu\n",
+            remote_cnt, inactive_cnt, active_cnt);
+
+    ((u64 *) rdma_buf)[0] = remote_cnt;
+    ((u64 *) rdma_buf)[1] = inactive_cnt;
+    ((u64 *) rdma_buf)[2] = active_cnt;
 
     vaddr = (u64) rdma_buf;
     payload = (struct payload_fmt *) output;
@@ -819,6 +822,8 @@ int get_region_metadata(struct krdma_conn *conn,
     struct rack_dm_page *rpage;
     struct krdma_conn *pg_conn;
     struct remote_page *remote_page;
+    u64 remote_cnt, inactive_cnt, active_cnt, prefetch_cnt;
+    u64 *prefetch_pages;
 
     DEBUG_LOG("[!!!] get_region_metadata\n");
 
@@ -868,16 +873,28 @@ int get_region_metadata(struct krdma_conn *conn,
         goto out_free_dma_buf;
     }
 
-    dma_free_coherent(
-            conn->cm_id->device->dma_device, size, rdma_buf, rdma_buf_dma_addr);
+    remote_cnt   = ((u64 *) rdma_buf)[0];
+    inactive_cnt = ((u64 *) rdma_buf)[1];
+    active_cnt   = ((u64 *) rdma_buf)[2];
+
+    pr_info("migration remote: %llu, inactive: %llu, active: %llu\n",
+            remote_cnt, inactive_cnt, active_cnt);
+
+    prefetch_pages = vzalloc(sizeof(u64) * active_cnt);
+    if (prefetch_pages == NULL) {
+        pr_err("failed to allocate memory for prefetch_pages\n");
+        goto out_free_dma_buf;
+    }
+    prefetch_cnt = 0;
 
     local_node_hash = krdma_local_node_hash();
-    n = size / sizeof(struct page_metadata);
+    n = (size / sizeof(struct page_metadata)) - 1;
     for (i = 0; i < n; i++) {
-        pg_index = ((struct page_metadata *) rdma_buf + i)->index;
-        pg_node_hash = ((struct page_metadata *) rdma_buf + i)->hash;
-        pg_vaddr = ((struct page_metadata *) rdma_buf + i)->vaddr;
-        pg_paddr = ((struct page_metadata *) rdma_buf + i)->paddr;
+        pg_index     = ((struct page_metadata *) rdma_buf + (i + 1))->index;
+        pg_node_hash = ((struct page_metadata *) rdma_buf + (i + 1))->hash;
+        pg_vaddr     = ((struct page_metadata *) rdma_buf + (i + 1))->vaddr;
+        pg_paddr     = ((struct page_metadata *) rdma_buf + (i + 1))->paddr;
+
         rpage = &region->pages[pg_index];
         if (pg_node_hash == local_node_hash) {
             rpage->buf = (void *) pg_vaddr;
@@ -891,7 +908,7 @@ int get_region_metadata(struct krdma_conn *conn,
                     region->page_size);
             if (ret) {
                 pr_err("failed to remap the page\n");
-                goto out_free_dma_buf;
+                goto out_free_prefetch_pages;
             }
 
             atomic64_fetch_add(1, &region->page_count);
@@ -904,13 +921,13 @@ int get_region_metadata(struct krdma_conn *conn,
             if (pg_conn == NULL) {
                 pr_err("error on krdma_get_node_by_key\n");
                 ret = -EINVAL;
-                goto out_free_dma_buf;
+                goto out_free_prefetch_pages;
             }
             remote_page = kzalloc(sizeof(*remote_page), GFP_KERNEL);
             if (remote_page == NULL) {
                 pr_err("failed to allocate memory for struct remote_page\n");
                 ret = -ENOMEM;
-                goto out_free_dma_buf;
+                goto out_free_prefetch_pages;
             }
             remote_page->conn = pg_conn;
             remote_page->remote_paddr = pg_paddr;
@@ -920,8 +937,24 @@ int get_region_metadata(struct krdma_conn *conn,
             DEBUG_LOG("[***] (restore remote page) node: %s, index: %llu, "
                       "vaddr: %llu, paddr: %llu\n",
                       pg_conn->nodename, pg_index, pg_vaddr, pg_paddr);
+
+            /* pre-fetch active and remote pages */
+            if (i >= (remote_cnt + inactive_cnt))
+                prefetch_pages[prefetch_cnt++] = pg_index;
         }
     }
+
+    if (prefetch_cnt > 0) {
+        region->prefetch_work.nr_pages = prefetch_cnt;
+        region->prefetch_work.arr = prefetch_pages;
+        schedule_work(&region->prefetch_work.ws);
+    } else {
+        /* there are no pages to fetch, release the array here */
+        vfree(prefetch_pages);
+    }
+
+    dma_free_coherent(
+            conn->cm_id->device->dma_device, size, rdma_buf, rdma_buf_dma_addr);
 
     ret = free_remote_memory(conn, size, remote_vaddr, remote_paddr);
     if (ret) {
@@ -933,6 +966,8 @@ int get_region_metadata(struct krdma_conn *conn,
 
     return 0;
 
+out_free_prefetch_pages:
+    vfree(prefetch_pages);
 out_free_dma_buf:
     dma_free_coherent(
             conn->cm_id->device->dma_device, size, rdma_buf, rdma_buf_dma_addr);

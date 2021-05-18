@@ -463,6 +463,60 @@ static void precopy_active_pages(struct work_struct *ws)
     count_event(region, RACK_DM_EVENT_PRECOPY_TASK);
 }
 
+static void prefetch_active_pages(struct work_struct *ws)
+{
+    int ret;
+    struct rack_dm_work *work;
+    struct rack_dm_region *region;
+    unsigned long i, nr_pages, fault_address;
+    u64 *prefetch_pages;
+    struct rack_dm_page *rpage;
+
+    work = container_of(ws, struct rack_dm_work, ws);
+    region = work->region;
+    nr_pages = work->nr_pages;
+    prefetch_pages = work->arr;
+
+    pr_info("prefetch_active_pages nr_pages: %lu, arr: %p\n",
+            nr_pages, prefetch_pages);
+
+    for (i = 0; i < nr_pages; i++) {
+        rpage = &region->pages[prefetch_pages[i]];
+        spin_lock(&rpage->lock);
+        if (rpage->flags != RACK_DM_PAGE_NOT_PRESENT) {
+            spin_unlock(&rpage->lock);
+            continue;
+        }
+        rpage->buf = rack_dm_alloc_buf(region);
+        if (rpage->buf == NULL) {
+            spin_unlock(&rpage->lock);
+            break;
+        }
+
+        ret = rack_dm_restore(region, rpage);
+        if (unlikely(ret)) {
+            pr_err("failed to restore the page\n");
+            spin_unlock(&rpage->lock);
+            break;
+        }
+
+        fault_address  = region->vma->vm_start;
+        fault_address += rpage->index * region->page_size;
+        ret = rack_dm_remap(region, rpage, fault_address, region->page_size);
+        if (unlikely(ret)) {
+            pr_err("failed to remap the page\n");
+            spin_unlock(&rpage->lock);
+            break;
+        }
+        spin_unlock(&rpage->lock);
+        count_event(region, RACK_DM_EVENT_PREFETCH_MIGRATION);
+    }
+
+    vfree(prefetch_pages);
+
+    count_event(region, RACK_DM_EVENT_PREFETCH_TASK);
+}
+
 struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
 {
     u64 i, total_size_bytes;
@@ -515,6 +569,9 @@ struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
 
     region->precopy_work.region = region;
     INIT_WORK(&region->precopy_work.ws, precopy_active_pages);
+
+    region->prefetch_work.region = region;
+    INIT_WORK(&region->prefetch_work.ws, prefetch_active_pages);
 
     region->stat = alloc_percpu(struct rack_dm_event_count);
     if (region->stat == NULL) {

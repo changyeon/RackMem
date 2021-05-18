@@ -26,6 +26,8 @@ enum rack_dm_event {
     RACK_DM_EVENT_BG_RECLAIM,
     RACK_DM_EVENT_BG_RECLAIM_PRECOPY,
     RACK_DM_EVENT_PRECOPY_TASK,
+    RACK_DM_EVENT_PREFETCH_MIGRATION,
+    RACK_DM_EVENT_PREFETCH_TASK,
     RACK_DM_EVENT_RDMA_READ,
     RACK_DM_EVENT_RDMA_WRITE,
     RACK_DM_EVENT_ALLOC_LOCAL_PAGE,
@@ -59,6 +61,8 @@ static const char * const rack_dm_events[] = {
     [RACK_DM_EVENT_BG_RECLAIM]              = "background_reclaim",
     [RACK_DM_EVENT_BG_RECLAIM_PRECOPY]      = "background_reclaim_precopy",
     [RACK_DM_EVENT_PRECOPY_TASK]            = "precopy_task",
+    [RACK_DM_EVENT_PREFETCH_MIGRATION]      = "prefetch_migration",
+    [RACK_DM_EVENT_PREFETCH_TASK]           = "prefetch_task",
     [RACK_DM_EVENT_RDMA_READ]               = "rdma_read",
     [RACK_DM_EVENT_RDMA_WRITE]              = "rdma_write",
     [RACK_DM_EVENT_ALLOC_LOCAL_PAGE]        = "alloc_local_page",
@@ -118,6 +122,7 @@ struct rack_dm_work {
     struct rack_dm_region *region;
     char target_node[64];
     unsigned long nr_pages;
+    u64 *arr;
 };
 
 struct rack_dm_region {
@@ -139,6 +144,7 @@ struct rack_dm_region {
     struct rack_dm_work remote_page_work;
     struct rack_dm_work reclaim_work;
     struct rack_dm_work precopy_work;
+    struct rack_dm_work prefetch_work;
 
     struct vm_area_struct *vma;
     struct rack_dm_event_count __percpu *stat;
