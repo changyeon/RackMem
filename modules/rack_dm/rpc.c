@@ -705,7 +705,7 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
     struct rack_dm_region *region;
     struct rack_dm_page *rpage;
     struct ib_device *ib_dev = (struct ib_device *) ctx;
-    u64 remote_cnt = 0, inactive_cnt = 0, active_cnt = 0;
+    u64 remote_cnt = 0, inactive_cnt = 0, active_cnt = 0, precopy_cnt = 0;
 
     DEBUG_LOG("[!!!] get_region_metadata_rpc_handler\n");
 
@@ -772,6 +772,7 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
             pg_paddr = rpage->remote_page->remote_paddr;
             kfree(rpage->remote_page);
             rpage->remote_page = NULL;
+            count_event(region, RACK_DM_EVENT_PRECOPY_PAGES);
         } else {
             pg_node_hash = local_node_hash;
             pg_vaddr = (u64) rpage->buf;
@@ -786,8 +787,9 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
         active_cnt++;
         cnt++;
     }
-    pr_info("migration remote: %llu, inactive: %llu, active: %llu\n",
-            remote_cnt, inactive_cnt, active_cnt);
+    pr_info("migration remote: %llu, inactive: %llu, active: %llu, "
+            "precopy: %llu\n", remote_cnt, inactive_cnt, active_cnt,
+            precopy_cnt);
 
     ((u64 *) rdma_buf)[0] = remote_cnt;
     ((u64 *) rdma_buf)[1] = inactive_cnt;
