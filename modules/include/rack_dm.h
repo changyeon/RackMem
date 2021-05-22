@@ -9,6 +9,7 @@
 #include <linux/percpu-defs.h>
 #include <linux/debugfs.h>
 #include <linux/workqueue.h>
+#include <linux/completion.h>
 #include <krdma.h>
 
 #define count_event(region, event) \
@@ -119,6 +120,7 @@ struct rack_dm_page {
 
 struct rack_dm_work {
     struct work_struct ws;
+    struct completion done;
     struct rack_dm_region *region;
     char target_node[64];
     unsigned long nr_pages;

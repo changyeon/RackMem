@@ -2,6 +2,7 @@
 
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
+#include <linux/jiffies.h>
 
 #include "debugfs.h"
 
@@ -80,6 +81,7 @@ static ssize_t debugfs_precopy(struct file *file, const char __user *buf,
     char cmd_buf[64] = {0};
     char target_node[64] = {0};
     unsigned long nr_pages = 0;
+    unsigned long jiffies;
 
     dentry_root = file->f_path.dentry->d_parent;
     region_dbgfs = dentry_root->d_inode->i_private;
@@ -91,7 +93,11 @@ static ssize_t debugfs_precopy(struct file *file, const char __user *buf,
 
     strcpy(region->precopy_work.target_node, target_node);
     region->precopy_work.nr_pages = nr_pages;
+    init_completion(&region->precopy_work.done);
     schedule_work(&region->precopy_work.ws);
+
+    jiffies = msecs_to_jiffies(10000) + 1;
+    ret = wait_for_completion_timeout(&region->precopy_work.done, jiffies);
 
     return ret;
 }

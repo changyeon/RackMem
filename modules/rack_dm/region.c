@@ -461,6 +461,7 @@ static void precopy_active_pages(struct work_struct *ws)
             target_node, nr_pages);
 
     count_event(region, RACK_DM_EVENT_PRECOPY_TASK);
+    complete(&region->precopy_work.done);
 }
 
 static void prefetch_active_pages(struct work_struct *ws)
