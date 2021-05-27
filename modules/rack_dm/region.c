@@ -8,6 +8,7 @@
 
 extern int g_debug;
 extern int g_local_pages;
+extern struct list_head to_free_remote_page_list;
 
 #define DEBUG_LOG if (g_debug) pr_info
 
@@ -548,6 +549,7 @@ static void migrate_clean_up_task(struct work_struct *ws)
     struct rack_dm_work *work;
     struct rack_dm_region *region;
     struct rack_dm_page *rpage;
+    struct remote_page *remote_page;
     u64 i;
 
     work = container_of(ws, struct rack_dm_work, ws);
@@ -558,16 +560,12 @@ static void migrate_clean_up_task(struct work_struct *ws)
     for (i = 0; i < region->max_pages; i++) {
         rpage = &region->pages[i];
         if ((rpage->flags == RACK_DM_PAGE_ACTIVE) && (rpage->remote_page)) {
-            /*
-             *ret = free_remote_user_page(
-             *        rpage->remote_page->conn, region->page_size,
-             *        rpage->remote_page->remote_vaddr,
-             *        rpage->remote_page->remote_paddr);
-             *if (ret) {
-             *    pr_err("error on free_remote_user_page\n");
-             *    break;
-             *}
-             */
+            remote_page = kzalloc(sizeof(*remote_page), GFP_KERNEL);
+            remote_page->conn = rpage->remote_page->conn;
+            remote_page->remote_paddr = rpage->remote_page->remote_paddr;
+            remote_page->remote_vaddr = rpage->remote_page->remote_vaddr;
+            INIT_LIST_HEAD(&remote_page->head);
+            list_add_tail(&remote_page->head, &to_free_remote_page_list);
         }
         if (rpage->remote_page) {
             kfree(rpage->remote_page);

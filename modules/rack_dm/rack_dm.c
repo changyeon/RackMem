@@ -21,6 +21,8 @@ int g_local_pages = 65536;
 module_param_named(local_pages, g_local_pages, int, 0);
 MODULE_PARM_DESC(local_pages, "the number of local pages for caching");
 
+LIST_HEAD(to_free_remote_page_list);
+
 static struct rack_dm_device_data {
     int major_number;
     struct class *class;
@@ -95,8 +97,23 @@ out:
     return ret;
 }
 
+static void free_remote_page_list_lazy(void)
+{
+    struct remote_page *node, *next;
+
+    pr_info("lazy free of remote pages\n");
+
+    list_for_each_entry_safe(node, next, &to_free_remote_page_list, head) {
+        free_remote_user_page(
+                node->conn, 4096UL, node->remote_vaddr, node->remote_paddr);
+        list_del_init(&node->head);
+        kfree(node);
+    }
+}
+
 static void __exit rack_dm_exit(void)
 {
+    free_remote_page_list_lazy();
     rack_dm_debugfs_cleanup();
     rack_dm_cleanup_rpc();
     device_destroy(rack_dm_device_data.class,

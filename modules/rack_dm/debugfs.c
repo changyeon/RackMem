@@ -154,6 +154,8 @@ static ssize_t debugfs_mem_limit_write(
 
     /* Step 1: update the region page_count_limit */
     atomic64_set(&region->page_count_limit, mem_limit_pages);
+    pr_info("update memory_limit_pages: %p (%lld -> %llu)\n",
+            region, atomic64_read(&region->page_count_limit), mem_limit_pages);
 
     while (atomic64_read(&region->page_count) > mem_limit_pages) {
         /* try to reclaim a page from inactive_list */

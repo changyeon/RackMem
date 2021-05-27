@@ -765,7 +765,9 @@ static int get_region_metadata_rpc_handler(void *input, void *output, void *ctx)
     }
 
     list_for_each_entry(rpage, &region->active_list.head, head) {
-        if (rpage->remote_page) {
+        /*if (rpage->remote_page) {*/
+        if (false) {
+            /* NOTE: PRECOPY_STOP OPTIMIZATION */
             rack_dm_writeback(region, rpage);
             pg_node_hash = rpage->remote_page->conn->nodename_hash;
             pg_vaddr = rpage->remote_page->remote_vaddr;
@@ -946,6 +948,7 @@ int get_region_metadata(struct krdma_conn *conn,
         }
     }
 
+    /* NOTE: PREFETCH OPTIMIZATION */
     if (prefetch_cnt > 0) {
         region->prefetch_work.nr_pages = prefetch_cnt;
         region->prefetch_work.arr = prefetch_pages;
