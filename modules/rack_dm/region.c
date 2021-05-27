@@ -69,6 +69,21 @@ int rack_dm_page_list_size(struct rack_dm_page_list *page_list)
     return size;
 }
 
+static void rack_dm_print_statistics(struct rack_dm_region *region)
+{
+    int i, cpu;
+    u64 sum[__NR_RACK_DM_EVENTS];
+
+    memset(sum, 0, sizeof(sum));
+    for_each_online_cpu(cpu)
+        for (i = 0; i < __NR_RACK_DM_EVENTS; i++)
+            sum[i] += per_cpu(region->stat->count[i], cpu);
+
+    for (i = 0; i < __NR_RACK_DM_EVENTS; i++)
+        pr_info("statistics (%p) %s: %llu\n", region, rack_dm_events[i],
+                sum[i]);
+}
+
 int rack_dm_remap(struct rack_dm_region *region, struct rack_dm_page *rpage,
                   u64 fault_address, u64 page_size)
 {
@@ -528,6 +543,44 @@ static void prefetch_active_pages(struct work_struct *ws)
     pr_info("prefetch_active_pages finished: %lu\n", cnt);
 }
 
+static void migrate_clean_up_task(struct work_struct *ws)
+{
+    struct rack_dm_work *work;
+    struct rack_dm_region *region;
+    struct rack_dm_page *rpage;
+    u64 i;
+
+    work = container_of(ws, struct rack_dm_work, ws);
+    region = work->region;
+
+    pr_info("rack_dm_migrate_clean_up_region %p\n", region);
+
+    for (i = 0; i < region->max_pages; i++) {
+        rpage = &region->pages[i];
+        if ((rpage->flags == RACK_DM_PAGE_ACTIVE) && (rpage->remote_page)) {
+            /*
+             *ret = free_remote_user_page(
+             *        rpage->remote_page->conn, region->page_size,
+             *        rpage->remote_page->remote_vaddr,
+             *        rpage->remote_page->remote_paddr);
+             *if (ret) {
+             *    pr_err("error on free_remote_user_page\n");
+             *    break;
+             *}
+             */
+        }
+        if (rpage->remote_page) {
+            kfree(rpage->remote_page);
+        }
+    }
+
+    free_remote_page_list(region);
+    rack_dm_print_statistics(region);
+    free_percpu(region->stat);
+    vfree(region->pages);
+    kfree(region);
+}
+
 struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
 {
     u64 i, total_size_bytes;
@@ -584,6 +637,9 @@ struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size)
     region->prefetch_work.region = region;
     INIT_WORK(&region->prefetch_work.ws, prefetch_active_pages);
 
+    region->migrate_clean_up_work.region = region;
+    INIT_WORK(&region->migrate_clean_up_work.ws, migrate_clean_up_task);
+
     region->stat = alloc_percpu(struct rack_dm_event_count);
     if (region->stat == NULL) {
         pr_err("error on alloc_percpu (region->stat)\n");
@@ -603,22 +659,7 @@ out:
     return NULL;
 }
 
-static void rack_dm_print_statistics(struct rack_dm_region *region)
-{
-    int i, cpu;
-    u64 sum[__NR_RACK_DM_EVENTS];
-
-    memset(sum, 0, sizeof(sum));
-    for_each_online_cpu(cpu)
-        for (i = 0; i < __NR_RACK_DM_EVENTS; i++)
-            sum[i] += per_cpu(region->stat->count[i], cpu);
-
-    for (i = 0; i < __NR_RACK_DM_EVENTS; i++)
-        pr_info("statistics (%p) %s: %llu\n", region, rack_dm_events[i],
-                sum[i]);
-}
-
-static void free_remote_page_list(struct rack_dm_region *region)
+void free_remote_page_list(struct rack_dm_region *region)
 {
     struct rack_dm_page_list *remote_page_list = &region->remote_page_list;
     struct remote_page *remote_page;
@@ -628,6 +669,7 @@ static void free_remote_page_list(struct rack_dm_region *region)
         free_remote_user_page(
                 remote_page->conn, region->page_size,
                 remote_page->remote_vaddr, remote_page->remote_paddr);
+        count_event(region, RACK_DM_EVENT_FREE_REMOTE_PAGE);
     }
     spin_unlock(&remote_page_list->lock);
 }
@@ -662,7 +704,6 @@ void rack_dm_free_region(struct rack_dm_region *region)
     }
 
     free_remote_page_list(region);
-
     rack_dm_print_statistics(region);
     free_percpu(region->stat);
     vfree(region->pages);
@@ -671,19 +712,5 @@ void rack_dm_free_region(struct rack_dm_region *region)
 
 void rack_dm_migrate_clean_up_region(struct rack_dm_region *region)
 {
-    u64 i;
-    struct rack_dm_page *rpage;
-
-    DEBUG_LOG("rack_dm_migrate_clean_up_region %p\n", region);
-
-    for (i = 0; i < region->max_pages; i++) {
-        rpage = &region->pages[i];
-        if (rpage->remote_page)
-            kfree(rpage->remote_page);
-    }
-
-    rack_dm_print_statistics(region);
-    free_percpu(region->stat);
-    vfree(region->pages);
-    kfree(region);
+    schedule_work(&region->migrate_clean_up_work.ws);
 }

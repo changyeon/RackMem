@@ -227,7 +227,8 @@ int rack_dm_debugfs_add_region(struct rack_dm_region *region)
     }
 
     region->dbgfs_mem_limit = debugfs_create_file(
-            "mem_limit_bytes", 0660, region->dbgfs_root, NULL, &fops_mem_limit);
+            "memory_limit_bytes", 0660, region->dbgfs_root, NULL,
+            &fops_mem_limit);
     if (region->dbgfs_mem_limit == NULL) {
         pr_err("failed to create region_debugfs: mem_limit\n");
         ret = -EINVAL;

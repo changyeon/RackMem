@@ -149,6 +149,7 @@ struct rack_dm_region {
     struct rack_dm_work reclaim_work;
     struct rack_dm_work precopy_work;
     struct rack_dm_work prefetch_work;
+    struct rack_dm_work migrate_clean_up_work;
 
     struct vm_area_struct *vma;
     struct rack_dm_event_count __percpu *stat;
@@ -177,6 +178,7 @@ void *rack_dm_reclaim_inactive(struct rack_dm_region *region);
 void *rack_dm_alloc_buf(struct rack_dm_region *region);
 int rack_dm_map_region(struct rack_dm_region *region, struct vm_area_struct *vma, struct vm_operations_struct *vm_ops);
 struct rack_dm_region *rack_dm_alloc_region(u64 size_bytes, u64 page_size);
+void free_remote_page_list(struct rack_dm_region *region);
 void rack_dm_free_region(struct rack_dm_region *region);
 void rack_dm_migrate_clean_up_region(struct rack_dm_region *region);
 int rack_dm_rdma(struct krdma_conn *conn, u64 local_dma_addr, u64 remote_dma_addr, u64 size, int dir);
