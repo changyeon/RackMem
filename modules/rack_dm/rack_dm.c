@@ -99,16 +99,17 @@ out:
 
 static void free_remote_page_list_lazy(void)
 {
+    u64 count = 0;
     struct remote_page *node, *next;
-
-    pr_info("lazy free of remote pages\n");
 
     list_for_each_entry_safe(node, next, &to_free_remote_page_list, head) {
         free_remote_user_page(
                 node->conn, 4096UL, node->remote_vaddr, node->remote_paddr);
         list_del_init(&node->head);
         kfree(node);
+        count++;
     }
+    pr_info("lazy free of remote pages: %llu\n", count);
 }
 
 static void __exit rack_dm_exit(void)
