@@ -290,8 +290,16 @@ void *rack_dm_reclaim_inactive(struct rack_dm_region *region)
             rpage->buf = NULL;
             rpage->flags = RACK_DM_PAGE_NOT_PRESENT;
         } else {
-            /* this page may be in ACTIVE state if this page is touched
-             * by another thread before we get the lock */
+            /*
+             * This page may be in ACTIVE state if the page is touched by
+             * another thread before we get the lock.
+             * In this case, the inactive_list size is decreased twice by this
+             * function and the pagefault handler.
+             * To make the size correct, we increment size by 1 here.
+             */
+            spin_lock(&region->inactive_list.lock);
+            region->inactive_list.size++;
+            spin_unlock(&region->inactive_list.lock);
             count_event(region, RACK_DM_EVENT_RECLAIM_INACTIVE_MISS);
         }
         spin_unlock(&rpage->lock);
