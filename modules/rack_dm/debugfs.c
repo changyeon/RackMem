@@ -106,6 +106,84 @@ static const struct file_operations fops_precopy = {
     .write = debugfs_precopy,
 };
 
+static ssize_t debugfs_mem_limit_read(
+        struct file *file, char __user *buf, size_t len, loff_t *ppos)
+{
+    ssize_t ret = 0;
+    struct dentry *dentry_root;
+    struct rack_dm_region_dbgfs *region_dbgfs;
+    struct rack_dm_region *region;
+    char mem_limit_str[64] = {0};
+
+    dentry_root = file->f_path.dentry->d_parent;
+    region_dbgfs = dentry_root->d_inode->i_private;
+    region = region_dbgfs->region;
+
+    snprintf(mem_limit_str, 64, "%lld\n",
+             region->page_size * atomic64_read(&region->page_count_limit));
+
+    ret = simple_read_from_buffer(buf, len, ppos, mem_limit_str, 64);
+
+    return ret;
+}
+
+static ssize_t debugfs_mem_limit_write(
+        struct file *file, const char __user *buf, size_t len, loff_t *ppos)
+{
+    ssize_t ret = 0;
+    struct dentry *dentry_root;
+    struct rack_dm_region_dbgfs *region_dbgfs;
+    struct rack_dm_region *region;
+    char mem_limit_str[64] = {0};
+    u64 mem_limit_bytes, mem_limit_pages;
+    void *page_buf;
+
+    dentry_root = file->f_path.dentry->d_parent;
+    region_dbgfs = dentry_root->d_inode->i_private;
+    region = region_dbgfs->region;
+
+    ret = simple_write_to_buffer(mem_limit_str, len, ppos, buf, 64);
+
+    sscanf(mem_limit_str, "%llu\n", &mem_limit_bytes);
+
+    mem_limit_pages = mem_limit_bytes / region->page_size;
+    if (mem_limit_pages > region->max_pages)
+        mem_limit_pages = region->max_pages;
+
+    spin_lock(&region_dbgfs->lock);
+
+    /* Step 1: update the region page_count_limit */
+    atomic64_set(&region->page_count_limit, mem_limit_pages);
+
+    while (atomic64_read(&region->page_count) > mem_limit_pages) {
+        /* try to reclaim a page from inactive_list */
+        page_buf = rack_dm_reclaim_inactive(region);
+        if (page_buf) {
+            vfree(page_buf);
+            atomic64_dec(&region->page_count);
+            count_event(region, RACK_DM_EVENT_FREE_LOCAL_PAGE);
+            continue;
+        }
+
+        /* reclaim a page from active_list */
+        page_buf = rack_dm_reclaim_active(region);
+        if (page_buf) {
+            vfree(page_buf);
+            atomic64_dec(&region->page_count);
+            count_event(region, RACK_DM_EVENT_FREE_LOCAL_PAGE);
+        }
+    }
+
+    spin_unlock(&region_dbgfs->lock);
+
+    return ret;
+}
+
+static const struct file_operations fops_mem_limit = {
+    .read  = debugfs_mem_limit_read,
+    .write = debugfs_mem_limit_write,
+};
+
 int rack_dm_debugfs_add_region(struct rack_dm_region *region)
 {
     int ret;
@@ -144,6 +222,14 @@ int rack_dm_debugfs_add_region(struct rack_dm_region *region)
             "precopy", 0660, region->dbgfs_root, NULL, &fops_precopy);
     if (region->dbgfs_precopy == NULL) {
         pr_err("failed to create region debugfs: precopy\n");
+        ret = -EINVAL;
+        goto out_destroy_dbgfs;
+    }
+
+    region->dbgfs_mem_limit = debugfs_create_file(
+            "mem_limit_bytes", 0660, region->dbgfs_root, NULL, &fops_mem_limit);
+    if (region->dbgfs_mem_limit == NULL) {
+        pr_err("failed to create region_debugfs: mem_limit\n");
         ret = -EINVAL;
         goto out_destroy_dbgfs;
     }

@@ -156,6 +156,7 @@ struct rack_dm_region {
     struct dentry *dbgfs_root;
     struct dentry *dbgfs_stat;
     struct dentry *dbgfs_precopy;
+    struct dentry *dbgfs_mem_limit;
 
     spinlock_t lock;
 };
