@@ -99,6 +99,13 @@ static int __init krdma_init(void)
         goto out_device_destroy;
     }
 
+    ret = krdma_debugfs_setup();
+    if (ret) {
+        pr_err("error on krdma_debugfs_setup\n");
+        ret = -EINVAL;
+        goto out_device_destroy;
+    }
+
     pr_info("module loaded: %s (%s, %d)\n", g_nodename, g_server, g_port);
 
     return 0;
@@ -116,6 +123,7 @@ out:
 
 static void __exit krdma_exit(void)
 {
+    krdma_debugfs_cleanup();
     krdma_cm_cleanup();
     krdma_free_rpc_table();
 

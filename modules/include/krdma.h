@@ -212,6 +212,12 @@ int register_all_krdma_rpc(void);
 void unregister_all_krdma_rpc(void);
 
 /*
+ * debugfs
+ */
+int krdma_debugfs_setup(void);
+void krdma_debugfs_cleanup(void);
+
+/*
  * Performance benchmark
  */
 int krdma_test_rpc_performance(struct krdma_conn *conn, int nr_threads);
