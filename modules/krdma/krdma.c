@@ -6,6 +6,7 @@
 #include <linux/utsname.h>
 
 #include "cm.h"
+#include "dbgfs.h"
 
 #define DEVICE_NAME "krdma"
 #define CLASS_NAME "krdma"
@@ -85,10 +86,18 @@ static int __init krdma_init(void)
         goto out_device_destroy;
     }
 
+    ret = krdma_debugfs_setup();
+    if (ret) {
+        pr_err("failed to register KRDMA debugfs\n");
+        goto out_krdma_close;
+    }
+
     pr_info("module loaded: %s (%s, %d)\n", g_nodename, g_server, g_port);
 
     return 0;
 
+out_krdma_close:
+    krdma_close();
 out_device_destroy:
     device_destroy(krdma_data.class, MKDEV(krdma_data.major_number, 0));
 out_class_destroy:
@@ -101,6 +110,7 @@ out:
 
 static void __exit krdma_exit(void)
 {
+    krdma_debugfs_cleanup();
     krdma_close();
     device_destroy(krdma_data.class, MKDEV(krdma_data.major_number, 0));
     class_destroy(krdma_data.class);
@@ -111,4 +121,3 @@ static void __exit krdma_exit(void)
 
 module_init(krdma_init);
 module_exit(krdma_exit);
-
