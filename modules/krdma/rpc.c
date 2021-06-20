@@ -43,13 +43,6 @@ struct cq_thread_data *cq_thread;
 /* RPC processing thread pool */
 struct rpc_thread_pool *rpc_thread_pool;
 
-/* KRDMA message cache */
-static struct rpc_message_pool {
-    struct list_head lh;
-    unsigned long size;
-    spinlock_t lock;
-} rpc_message_pool;
-
 static int cq_thread_func(void *data)
 {
     int timeout = 1000;
@@ -82,37 +75,32 @@ static int rpc_thread_func(void *data)
     return 0;
 }
 
-static struct krdma_msg *allocate_msg(struct ib_device *ib_dev,
-                                      struct ib_pd *pd, unsigned long size)
-
+static struct krdma_msg *alloc_msg(struct krdma_conn *conn, unsigned long size)
 {
-    int ret;
     struct krdma_msg *msg;
 
     msg = kzalloc(sizeof(*msg), GFP_KERNEL);
     if (msg == NULL) {
         pr_err("failed to allocate memory for krdma_msg\n");
-        ret = -ENOMEM;
         goto out;
     }
 
     INIT_LIST_HEAD(&msg->lh);
     init_completion(&msg->done);
     msg->size = size;
-    msg->ib_dev = ib_dev;
+    msg->ib_dev = conn->cm_id->device;
 
-    msg->buf = ib_dma_alloc_coherent(ib_dev, size, &msg->dma_addr,
-            GFP_KERNEL);
+    msg->buf = ib_dma_alloc_coherent(msg->ib_dev, size, &msg->dma_addr,
+                                     GFP_KERNEL);
     if (msg->buf == NULL) {
         pr_err("failed to allocate DMA buffer for krdma_msg\n");
-        ret = -ENOMEM;
         kfree(msg);
         goto out;
     }
 
     msg->sge.addr = msg->dma_addr;
     msg->sge.length = size;
-    msg->sge.lkey = pd->local_dma_lkey;
+    msg->sge.lkey = conn->pd->local_dma_lkey;
 
     msg->send_wr.wr_id = (u64) msg;
     msg->send_wr.opcode = IB_WR_SEND;
@@ -127,73 +115,78 @@ static struct krdma_msg *allocate_msg(struct ib_device *ib_dev,
     return msg;
 
 out:
-    return ERR_PTR(-ENOMEM);
+    return NULL;
 }
 
-static int create_rpc_message_pool(struct ib_device *ib_dev, struct ib_pd *pd,
-                                   unsigned long n, unsigned long size)
+struct krdma_msg_pool *krdma_msg_pool_create(
+        struct krdma_conn *conn, unsigned long n, unsigned long size)
 {
-    int ret;
     unsigned long i;
     struct krdma_msg *msg;
+    struct krdma_msg_pool *pool;
 
-    INIT_LIST_HEAD(&rpc_message_pool.lh);
-    spin_lock_init(&rpc_message_pool.lock);
-    rpc_message_pool.size = 0;
+    pool = kzalloc(sizeof(*pool), GFP_KERNEL);
+    if (pool == NULL) {
+        pr_err("failed to allocate memory for krdma_msg_pool\n");
+        goto out;
+    }
+
+    INIT_LIST_HEAD(&pool->lh);
+    spin_lock_init(&pool->lock);
+    pool->size = 0;
 
     for (i = 0; i < n; i++) {
-        msg = allocate_msg(ib_dev, pd, size);
-        if (IS_ERR(msg)) {
+        msg = alloc_msg(conn, size);
+        if (msg == NULL) {
             pr_err("failed to allocate a krdma_msg\n");
-            ret = PTR_ERR(msg);
             goto out;
         }
         /* add the message to the pool */
-        spin_lock(&rpc_message_pool.lock);
-        list_add_tail(&msg->lh, &rpc_message_pool.lh);
-        rpc_message_pool.size++;
-        spin_unlock(&rpc_message_pool.lock);
+        krdma_msg_pool_put(pool, msg);
     }
 
-    return 0;
+    DEBUG_LOG("create msg pool (%p, %lu, %lu)\n", pool, n, size);
+
+    return pool;
 
 out:
-    return ret;
+    return NULL;
 }
 
-static void destroy_rpc_message_pool(void)
-{
-    struct krdma_msg *msg, *next;
-
-    spin_lock(&rpc_message_pool.lock);
-    list_for_each_entry_safe(msg, next, &rpc_message_pool.lh, lh) {
-        rpc_message_pool.size--;
-        ib_dma_free_coherent(msg->ib_dev, msg->size, msg->buf, msg->dma_addr);
-        list_del_init(&msg->lh);
-        kfree(msg);
-    }
-    spin_unlock(&rpc_message_pool.lock);
-}
-
-struct krdma_msg *krdma_msg_cache_get(void)
+void krdma_msg_pool_destroy(struct krdma_msg_pool *pool)
 {
     struct krdma_msg *msg;
 
-    spin_lock(&rpc_message_pool.lock);
-    msg = list_first_entry(&rpc_message_pool.lh, struct krdma_msg, lh);
+    DEBUG_LOG("destroy msg pool %p\n", pool);
+
+    while(!list_empty(&pool->lh)) {
+        msg = krdma_msg_pool_get(pool);
+        ib_dma_free_coherent(msg->ib_dev, msg->size, msg->buf, msg->dma_addr);
+        kfree(msg);
+    }
+
+    kfree(pool);
+}
+
+struct krdma_msg *krdma_msg_pool_get(struct krdma_msg_pool *pool)
+{
+    struct krdma_msg *msg;
+
+    spin_lock(&pool->lock);
+    msg = list_first_entry(&pool->lh, struct krdma_msg, lh);
     list_del_init(&msg->lh);
-    rpc_message_pool.size--;
-    spin_unlock(&rpc_message_pool.lock);
+    pool->size--;
+    spin_unlock(&pool->lock);
 
     return msg;
 }
 
-void krdma_msg_cache_put(struct krdma_msg *msg)
+void krdma_msg_pool_put(struct krdma_msg_pool *pool, struct krdma_msg *msg)
 {
-    spin_lock(&rpc_message_pool.lock);
-    list_add_tail(&msg->lh, &rpc_message_pool.lh);
-    rpc_message_pool.size++;
-    spin_unlock(&rpc_message_pool.lock);
+    spin_lock(&pool->lock);
+    list_add_tail(&msg->lh, &pool->lh);
+    pool->size++;
+    spin_unlock(&pool->lock);
 }
 
 int krdma_rpc_setup(struct ib_device *ib_dev, struct ib_pd *pd,
@@ -275,23 +268,12 @@ int krdma_rpc_setup(struct ib_device *ib_dev, struct ib_pd *pd,
         goto out_kfree_cq_thread;
     }
 
-    /* create a RPC message pool */
-    ret = create_rpc_message_pool(ib_dev, pd, KRDMA_RPC_MSG_POOL_SIZE,
-                                  KRDMA_RPC_MSG_SIZE);
-    if (ret) {
-        pr_err("failed to create KRDMA RPC message pool\n");
-        destroy_rpc_message_pool();
-        goto out_stop_cq_thread;
-    }
-
     for (i = 0; i < rpc_thread_pool->n; i++)
         wake_up_process(rpc_thread_pool->threads[i].task);
     wake_up_process(cq_thread->task);
 
     return 0;
 
-out_stop_cq_thread:
-    kthread_stop(cq_thread->task);
 out_kfree_cq_thread:
     kfree(cq_thread);
     to_free = rpc_thread_pool->n;
@@ -312,9 +294,6 @@ out:
 void krdma_rpc_cleanup(void)
 {
     int i;
-
-    /* destroy a RPC message pool */
-    destroy_rpc_message_pool();
 
     /* stop the CQ processing thread */
     kthread_stop(cq_thread->task);

@@ -3,9 +3,6 @@
 
 #include <rdma/ib_verbs.h>
 
-#define KRDMA_RPC_MSG_SIZE          4096UL
-#define KRDMA_RPC_MSG_POOL_SIZE     1024UL
-
 int krdma_rpc_setup(struct ib_device *ib_dev, struct ib_pd *pd, struct ib_cq *cq);
 void krdma_rpc_cleanup(void);
 
