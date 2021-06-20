@@ -706,7 +706,6 @@ int krdma_connect(char *server, int port)
     int timeout = 100;
     struct krdma_conn *conn;
     struct sockaddr_storage dst_addr;
-    unsigned long jiffies;
 
     conn = kzalloc(sizeof(*conn), GFP_KERNEL);
     if (conn == NULL) {
@@ -740,8 +739,8 @@ int krdma_connect(char *server, int port)
         goto out_destroy_cm_id;
     }
 
-    jiffies = msecs_to_jiffies(timeout) + 1;
-    ret = wait_for_completion_timeout(&conn->cm_done, jiffies);
+    ret = wait_for_completion_timeout(
+            &conn->cm_done, msecs_to_jiffies(timeout));
     if (ret == 0) {
         pr_err("krdma_connect timeout\n");
         ret = -ETIMEDOUT;
