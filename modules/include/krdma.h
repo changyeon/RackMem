@@ -11,9 +11,6 @@ struct krdma_conn {
     struct completion cm_done;
     struct work_struct cleanup_connection_work;
 
-    struct ib_pd *pd;
-    struct ib_cq *cq;
-
     /* RPC related */
     struct ib_send_wr send_wr;
     struct ib_sge send_sge;

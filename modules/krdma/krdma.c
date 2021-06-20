@@ -80,24 +80,24 @@ static int __init krdma_init(void)
     }
 
     /* make KRDMA ready for accepting connections */
-    ret = krdma_listen(g_server, g_port);
+    ret = krdma_setup(g_server, g_port);
     if (ret) {
-        pr_err("error on krdma_listen\n");
+        pr_err("error on krdma_setup\n");
         goto out_device_destroy;
     }
 
     ret = krdma_debugfs_setup();
     if (ret) {
         pr_err("failed to register KRDMA debugfs\n");
-        goto out_krdma_close;
+        goto out_krdma_cleanup;
     }
 
     pr_info("module loaded: %s (%s, %d)\n", g_nodename, g_server, g_port);
 
     return 0;
 
-out_krdma_close:
-    krdma_close();
+out_krdma_cleanup:
+    krdma_cleanup();
 out_device_destroy:
     device_destroy(krdma_data.class, MKDEV(krdma_data.major_number, 0));
 out_class_destroy:
@@ -111,7 +111,7 @@ out:
 static void __exit krdma_exit(void)
 {
     krdma_debugfs_cleanup();
-    krdma_close();
+    krdma_cleanup();
     device_destroy(krdma_data.class, MKDEV(krdma_data.major_number, 0));
     class_destroy(krdma_data.class);
     unregister_chrdev(krdma_data.major_number, DEVICE_NAME);

@@ -5,17 +5,31 @@
 #include <linux/socket.h>
 
 #include "cm.h"
+#include "rpc.h"
 #include <krdma.h>
 
 extern int g_debug;
 
 #define DEBUG_LOG if (g_debug) pr_info
 
+/* shared ib resources */
+static struct ib_pd *global_pd;
+static struct ib_cq *global_cq;
+
 static struct rdma_cm_id *server_cm_id;
 
-/* linked list for the connected nodes */
+/* a list for the connected nodes */
 static LIST_HEAD(conn_list);
 static DEFINE_SPINLOCK(conn_list_lock);
+
+/* ib_device list */
+static LIST_HEAD(ib_dev_list);
+static DEFINE_SPINLOCK(ib_dev_list_lock);
+
+struct krdma_ib_dev {
+    struct list_head head;
+    struct ib_device *ib_dev;
+};
 
 static int krdma_poll_cq_one(struct ib_cq *cq)
 {
@@ -53,10 +67,10 @@ static void handshake_client(struct krdma_conn *conn)
     }
 
     /* poll send */
-    krdma_poll_cq_one(conn->cq);
+    krdma_poll_cq_one(global_cq);
 
     /* poll recv */
-    krdma_poll_cq_one(conn->cq);
+    krdma_poll_cq_one(global_cq);
 
     ret = ib_post_recv(conn->cm_id->qp, recv_wr, &bad_recv_wr);
     if (ret) {
@@ -77,7 +91,7 @@ static void handshake_server(struct krdma_conn *conn)
     const struct ib_recv_wr *recv_wr = &conn->recv_wr;
 
     /* poll recv */
-    krdma_poll_cq_one(conn->cq);
+    krdma_poll_cq_one(global_cq);
 
     ret = ib_post_recv(conn->cm_id->qp, recv_wr, &bad_recv_wr);
     if (ret) {
@@ -92,7 +106,7 @@ static void handshake_server(struct krdma_conn *conn)
     }
 
     /* poll send */
-    krdma_poll_cq_one(conn->cq);
+    krdma_poll_cq_one(global_cq);
 
 out:
     return;
@@ -103,7 +117,7 @@ static int allocate_msg(struct krdma_conn *conn)
     int ret;
 
     conn->send_buf_local = dma_alloc_coherent(
-            conn->pd->device->dma_device, 4096UL, &conn->send_buf_dma,
+            global_pd->device->dma_device, 4096UL, &conn->send_buf_dma,
             GFP_KERNEL);
     if (conn->send_buf_local == NULL) {
         pr_err("failed to allocate dma buffer for send msg\n");
@@ -112,7 +126,7 @@ static int allocate_msg(struct krdma_conn *conn)
     }
 
     conn->recv_buf_local = dma_alloc_coherent(
-            conn->pd->device->dma_device, 4096UL, &conn->recv_buf_dma,
+            global_pd->device->dma_device, 4096UL, &conn->recv_buf_dma,
             GFP_KERNEL);
     if (conn->recv_buf_local == NULL) {
         pr_err("failed to allocate dma buffer for recv msg\n");
@@ -121,7 +135,7 @@ static int allocate_msg(struct krdma_conn *conn)
     }
 
     conn->send_sge.addr = conn->send_buf_dma;
-    conn->send_sge.lkey = conn->pd->local_dma_lkey;
+    conn->send_sge.lkey = global_pd->local_dma_lkey;
     conn->send_sge.length = 4096UL;
 
     conn->send_wr.wr_id = (u64) conn;
@@ -131,7 +145,7 @@ static int allocate_msg(struct krdma_conn *conn)
     conn->send_wr.num_sge = 1;
 
     conn->recv_sge.addr = conn->recv_buf_dma;
-    conn->recv_sge.lkey = conn->pd->local_dma_lkey;
+    conn->recv_sge.lkey = global_pd->local_dma_lkey;
     conn->recv_sge.length = 4096UL;
 
     conn->recv_wr.wr_id = (u64) conn;
@@ -141,7 +155,7 @@ static int allocate_msg(struct krdma_conn *conn)
     return 0;
 
 out_free_send_buf:
-    dma_free_coherent(conn->pd->device->dma_device, 4096UL,
+    dma_free_coherent(global_pd->device->dma_device, 4096UL,
                       conn->send_buf_local, conn->send_buf_dma);
 out:
     return ret;
@@ -149,9 +163,9 @@ out:
 
 static void free_msg(struct krdma_conn *conn)
 {
-    dma_free_coherent(conn->pd->device->dma_device, 4096UL,
+    dma_free_coherent(global_pd->device->dma_device, 4096UL,
                       conn->send_buf_local, conn->send_buf_dma);
-    dma_free_coherent(conn->pd->device->dma_device, 4096UL,
+    dma_free_coherent(global_pd->device->dma_device, 4096UL,
                       conn->recv_buf_local, conn->recv_buf_dma);
 }
 
@@ -166,9 +180,6 @@ static void cleanup_connection(struct work_struct *ws)
     rdma_destroy_qp(conn->cm_id);
     rdma_destroy_id(conn->cm_id);
 
-    ib_destroy_cq(conn->cq);
-    ib_dealloc_pd(conn->pd);
-
     spin_lock(&conn_list_lock);
     list_del_init(&conn->lh);
     spin_unlock(&conn_list_lock);
@@ -181,34 +192,13 @@ static int addr_resolved(struct krdma_conn *conn)
 {
     int ret;
     int timeout = 1000;
-    struct ib_cq_init_attr cq_attr;
     struct ib_qp_init_attr qp_attr;
-
-    /* allocate ib_pd */
-    conn->pd = ib_alloc_pd(conn->cm_id->device, IB_PD_UNSAFE_GLOBAL_RKEY);
-    if (IS_ERR(conn->pd)) {
-        ret = PTR_ERR(conn->pd);
-        pr_err("error on ib_alloc_pd: %d\n", ret);
-        goto out;
-    }
-
-    /* create ib_cq */
-    memset(&cq_attr, 0, sizeof(cq_attr));
-    cq_attr.cqe = 256;
-    cq_attr.comp_vector = 0;
-
-    conn->cq = ib_create_cq(conn->cm_id->device, NULL, NULL, conn, &cq_attr);
-    if (IS_ERR(conn->cq)) {
-        ret = PTR_ERR(conn->cq);
-        pr_err("error on ib_create_cq: %d\n", ret);
-        goto out_dealloc_pd;
-    }
 
     /* create ib_qp */
     memset(&qp_attr, 0, sizeof(qp_attr));
     qp_attr.qp_context = (void *) conn;
-    qp_attr.send_cq = conn->cq;
-    qp_attr.recv_cq = conn->cq;
+    qp_attr.send_cq = global_cq;
+    qp_attr.recv_cq = global_cq;
     qp_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     qp_attr.qp_type = IB_QPT_RC;
     qp_attr.cap.max_send_wr = KRDMA_MAX_SEND_WR;
@@ -220,10 +210,10 @@ static int addr_resolved(struct krdma_conn *conn)
     qp_attr.cap.max_send_wr++;
     qp_attr.cap.max_recv_wr++;
 
-    ret = rdma_create_qp(conn->cm_id, conn->pd, &qp_attr);
+    ret = rdma_create_qp(conn->cm_id, global_pd, &qp_attr);
     if (ret) {
         pr_err("error on rdma_create_qp: %d\n", ret);
-        goto out_destroy_cq;
+        goto out;
     }
 
     ret = rdma_resolve_route(conn->cm_id, timeout);
@@ -236,12 +226,6 @@ static int addr_resolved(struct krdma_conn *conn)
 
 out_destroy_qp:
     rdma_destroy_qp(conn->cm_id);
-out_destroy_cq:
-    ib_destroy_cq(conn->cq);
-    conn->cq = NULL;
-out_dealloc_pd:
-    ib_dealloc_pd(conn->pd);
-    conn->pd = NULL;
 out:
     return ret;
 }
@@ -356,7 +340,6 @@ static int connect_request(struct rdma_cm_id *cm_id)
 {
     int ret;
     struct krdma_conn *conn;
-    struct ib_cq_init_attr cq_attr;
     struct ib_qp_init_attr qp_attr;
     const struct ib_recv_wr *bad_recv_wr;
     struct rdma_conn_param conn_param;
@@ -374,31 +357,11 @@ static int connect_request(struct rdma_cm_id *cm_id)
 
     conn->cm_id = cm_id;
 
-    /* allocate ib_pd */
-    conn->pd = ib_alloc_pd(conn->cm_id->device, IB_PD_UNSAFE_GLOBAL_RKEY);
-    if (IS_ERR(conn->pd)) {
-        ret = PTR_ERR(conn->pd);
-        pr_err("error on ib_alloc_pd: %d\n", ret);
-        goto out_kfree_conn;
-    }
-
-    /* create ib_cq */
-    memset(&cq_attr, 0, sizeof(cq_attr));
-    cq_attr.cqe = 256;
-    cq_attr.comp_vector = 0;
-
-    conn->cq = ib_create_cq(conn->cm_id->device, NULL, NULL, conn, &cq_attr);
-    if (IS_ERR(conn->cq)) {
-        ret = PTR_ERR(conn->cq);
-        pr_err("error on ib_create_cq: %d\n", ret);
-        goto out_dealloc_pd;
-    }
-
     /* create ib_qp */
     memset(&qp_attr, 0, sizeof(qp_attr));
     qp_attr.qp_context = (void *) conn;
-    qp_attr.send_cq = conn->cq;
-    qp_attr.recv_cq = conn->cq;
+    qp_attr.send_cq = global_cq;
+    qp_attr.recv_cq = global_cq;
     qp_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     qp_attr.qp_type = IB_QPT_RC;
     qp_attr.cap.max_send_wr = KRDMA_MAX_SEND_WR;
@@ -410,10 +373,10 @@ static int connect_request(struct rdma_cm_id *cm_id)
     qp_attr.cap.max_send_wr++;
     qp_attr.cap.max_recv_wr++;
 
-    ret = rdma_create_qp(conn->cm_id, conn->pd, &qp_attr);
+    ret = rdma_create_qp(conn->cm_id, global_pd, &qp_attr);
     if (ret) {
         pr_err("error on rdma_create_qp: %d\n", ret);
-        goto out_destroy_cq;
+        goto out_kfree_conn;
     }
 
     ret = allocate_msg(conn);
@@ -445,12 +408,6 @@ out_free_msg:
     free_msg(conn);
 out_destroy_qp:
     rdma_destroy_qp(conn->cm_id);
-out_destroy_cq:
-    ib_destroy_cq(conn->cq);
-    conn->cq = NULL;
-out_dealloc_pd:
-    ib_dealloc_pd(conn->pd);
-    conn->pd = NULL;
 out_kfree_conn:
     kfree(conn);
 out:
@@ -548,19 +505,122 @@ out:
     return ret;
 }
 
-int krdma_listen(char *server, int port)
+static void krdma_add_ib_device(struct ib_device *ib_dev)
+{
+    struct krdma_ib_dev *krdma_ib_dev;
+
+    DEBUG_LOG("add a ib_device to the list: %p\n", ib_dev);
+
+    krdma_ib_dev = kzalloc(sizeof(struct krdma_ib_dev), GFP_KERNEL);
+    if (krdma_ib_dev == NULL) {
+        pr_err("failed to allocate memory for krdma_ib_dev\n");
+        return;
+    }
+
+    krdma_ib_dev->ib_dev = ib_dev;
+    INIT_LIST_HEAD(&krdma_ib_dev->head);
+
+    spin_lock(&ib_dev_list_lock);
+    list_add_tail(&krdma_ib_dev->head, &ib_dev_list);
+    spin_unlock(&ib_dev_list_lock);
+}
+
+static void krdma_remove_ib_device(struct ib_device *ib_dev, void *client_data)
+{
+    struct krdma_ib_dev *krdma_ib_dev;
+    struct krdma_ib_dev *target = NULL;
+
+    DEBUG_LOG("remove a ib_device from the list: %p\n", ib_dev);
+
+    spin_lock(&ib_dev_list_lock);
+    list_for_each_entry(krdma_ib_dev, &ib_dev_list, head) {
+        if (krdma_ib_dev->ib_dev == ib_dev) {
+            target = krdma_ib_dev;
+            break;
+        }
+    }
+    if (target) {
+        list_del_init(&target->head);
+        kfree(target);
+    }
+    spin_unlock(&ib_dev_list_lock);
+}
+
+static struct ib_client krdma_ib_client = {
+    .name       = "krdma",
+    .add        = krdma_add_ib_device,
+    .remove     = krdma_remove_ib_device
+};
+
+
+static void cq_comp_handler(struct ib_cq *cq, void *ctx)
+{
+    DEBUG_LOG("cq_comp_handler: (%p, %p)\n", cq, ctx);
+    /* TODO: add implementation */
+}
+
+static void cq_event_handler(struct ib_event *event, void *ctx)
+{
+    DEBUG_LOG("cq_event_handler: (%s, %p)\n", ib_event_msg(event->event), ctx);
+    /* TODO: add implementation */
+}
+
+int krdma_setup(char *server, int port)
 {
     int ret;
     int backlog = 128;
     struct sockaddr_storage sin;
+    struct krdma_ib_dev *dev;
+    struct ib_cq_init_attr cq_attr;
 
-    /* NOTE: returning non-zero value from the handler will destroy cm_id. */
+    /* Step 1: register a ib_client */
+    ret = ib_register_client(&krdma_ib_client);
+    if (ret) {
+        pr_err("failed to register a ib_client\n");
+        goto out;
+    }
+
+    dev = list_first_entry(&ib_dev_list, struct krdma_ib_dev, head);
+    if (dev == NULL) {
+        pr_err("failed to get a krdma_ib_dev from the list\n");
+        goto out_unregister_ib_client;
+    }
+
+    /* Step 2: allocate global ib_pd */
+    global_pd = ib_alloc_pd(dev->ib_dev, IB_PD_UNSAFE_GLOBAL_RKEY);
+    if (IS_ERR(global_pd)) {
+        ret = PTR_ERR(global_pd);
+        pr_err("failed to allocate global pd: %d\n", ret);
+        goto out_unregister_ib_client;
+    }
+
+    memset(&cq_attr, 0, sizeof(cq_attr));
+    cq_attr.cqe = KRDMA_MAX_CQE;
+    cq_attr.comp_vector = 0;
+
+    /* Step 3: allocate global ib_cq */
+    global_cq = ib_create_cq(dev->ib_dev, cq_comp_handler, cq_event_handler,
+                             NULL, &cq_attr);
+    if (IS_ERR(global_cq)) {
+        ret = PTR_ERR(global_cq);
+        pr_err("failed to create global cq: %d\n", ret);
+        goto out_dealloc_pd;
+    }
+
+    /* Step 4: setup RPC processing threads */
+    ret = krdma_rpc_setup(global_cq);
+    if (ret) {
+        pr_err("failed to setup krdma RPC\n");
+        goto out_destroy_cq;
+    }
+
+    /* Step 5: create a rdma_cm_id for the server */
     server_cm_id = rdma_create_id(&init_net, krdma_cm_event_handler_server,
                                   NULL, RDMA_PS_TCP, IB_QPT_RC);
     if (IS_ERR(server_cm_id)) {
         ret = PTR_ERR(server_cm_id);
         pr_err("error on rdma_create_id: %d\n", ret);
-        goto out;
+        goto out_rpc_cleanup;
     }
 
     ret = fill_sockaddr(&sin, AF_INET, server, port);
@@ -581,12 +641,22 @@ int krdma_listen(char *server, int port)
         goto out_destroy_cm_id;
     }
 
-    DEBUG_LOG("krdma_listen, server_cm_id: %p\n", server_cm_id);
+    DEBUG_LOG("krdma_setup, server_cm_id: %p\n", server_cm_id);
 
     return 0;
 
 out_destroy_cm_id:
     rdma_destroy_id(server_cm_id);
+out_rpc_cleanup:
+    krdma_rpc_cleanup();
+out_destroy_cq:
+    ib_destroy_cq(global_cq);
+    global_cq = NULL;
+out_dealloc_pd:
+    ib_dealloc_pd(global_pd);
+    global_pd = NULL;
+out_unregister_ib_client:
+    ib_unregister_client(&krdma_ib_client);
 out:
     return ret;
 }
@@ -604,7 +674,7 @@ static int live_connections(void)
     return n;
 }
 
-void krdma_close(void)
+void krdma_cleanup(void)
 {
     struct krdma_conn *conn;
 
@@ -618,9 +688,16 @@ void krdma_close(void)
         udelay(1000);
 
     rdma_destroy_id(server_cm_id);
-    server_cm_id = NULL;
+    krdma_rpc_cleanup();
+    ib_destroy_cq(global_cq);
+    ib_dealloc_pd(global_pd);
+    ib_unregister_client(&krdma_ib_client);
 
-    DEBUG_LOG("krdma_close, server_cm_id: %p\n", server_cm_id);
+    server_cm_id = NULL;
+    global_cq = NULL;
+    global_pd = NULL;
+
+    DEBUG_LOG("krdma_cleanup, server_cm_id: %p\n", server_cm_id);
 }
 
 int krdma_connect(char *server, int port)
