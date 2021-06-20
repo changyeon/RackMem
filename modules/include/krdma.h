@@ -23,4 +23,19 @@ struct krdma_conn {
     dma_addr_t recv_buf_dma;
 };
 
+struct krdma_msg {
+    struct list_head lh;
+    struct completion done;
+    u64 size;
+    struct ib_device *ib_dev;
+    void *buf;
+    dma_addr_t dma_addr;
+    struct ib_sge sge;
+    struct ib_send_wr send_wr;
+    struct ib_recv_wr recv_wr;
+};
+
+struct krdma_msg *krdma_msg_cache_get(void);
+void krdma_msg_cache_put(struct krdma_msg *msg);
+
 #endif /* _INCLUDE_KRDMA_H_ */

@@ -608,7 +608,7 @@ int krdma_setup(char *server, int port)
     }
 
     /* Step 4: setup RPC processing threads */
-    ret = krdma_rpc_setup(global_cq);
+    ret = krdma_rpc_setup(dev->ib_dev, global_pd, global_cq);
     if (ret) {
         pr_err("failed to setup krdma RPC\n");
         goto out_destroy_cq;
