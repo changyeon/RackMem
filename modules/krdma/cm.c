@@ -57,8 +57,8 @@ static void handshake_client(struct krdma_conn *conn)
     int ret;
     const struct ib_send_wr *bad_send_wr;
     const struct ib_recv_wr *bad_recv_wr;
-    const struct ib_send_wr *send_wr = &conn->send_wr;
-    const struct ib_recv_wr *recv_wr = &conn->recv_wr;
+    const struct ib_send_wr *send_wr = &conn->send_msg->send_wr;
+    const struct ib_recv_wr *recv_wr = &conn->recv_msg->recv_wr;
 
     ret = ib_post_send(conn->cm_id->qp, send_wr, &bad_send_wr);
     if (ret) {
@@ -87,8 +87,8 @@ static void handshake_server(struct krdma_conn *conn)
     int ret;
     const struct ib_send_wr *bad_send_wr;
     const struct ib_recv_wr *bad_recv_wr;
-    const struct ib_send_wr *send_wr = &conn->send_wr;
-    const struct ib_recv_wr *recv_wr = &conn->recv_wr;
+    const struct ib_send_wr *send_wr = &conn->send_msg->send_wr;
+    const struct ib_recv_wr *recv_wr = &conn->recv_msg->recv_wr;
 
     /* poll recv */
     krdma_poll_cq_one(global_cq);
@@ -112,73 +112,17 @@ out:
     return;
 }
 
-static int allocate_msg(struct krdma_conn *conn)
-{
-    int ret;
-
-    conn->send_buf_local = dma_alloc_coherent(
-            global_pd->device->dma_device, 4096UL, &conn->send_buf_dma,
-            GFP_KERNEL);
-    if (conn->send_buf_local == NULL) {
-        pr_err("failed to allocate dma buffer for send msg\n");
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    conn->recv_buf_local = dma_alloc_coherent(
-            global_pd->device->dma_device, 4096UL, &conn->recv_buf_dma,
-            GFP_KERNEL);
-    if (conn->recv_buf_local == NULL) {
-        pr_err("failed to allocate dma buffer for recv msg\n");
-        ret = -ENOMEM;
-        goto out_free_send_buf;
-    }
-
-    conn->send_sge.addr = conn->send_buf_dma;
-    conn->send_sge.lkey = global_pd->local_dma_lkey;
-    conn->send_sge.length = 4096UL;
-
-    conn->send_wr.wr_id = (u64) conn;
-    conn->send_wr.opcode = IB_WR_SEND;
-    conn->send_wr.send_flags = IB_SEND_SIGNALED;
-    conn->send_wr.sg_list = &conn->send_sge;
-    conn->send_wr.num_sge = 1;
-
-    conn->recv_sge.addr = conn->recv_buf_dma;
-    conn->recv_sge.lkey = global_pd->local_dma_lkey;
-    conn->recv_sge.length = 4096UL;
-
-    conn->recv_wr.wr_id = (u64) conn;
-    conn->recv_wr.sg_list = &conn->recv_sge;
-    conn->recv_wr.num_sge = 1;
-
-    return 0;
-
-out_free_send_buf:
-    dma_free_coherent(global_pd->device->dma_device, 4096UL,
-                      conn->send_buf_local, conn->send_buf_dma);
-out:
-    return ret;
-}
-
-static void free_msg(struct krdma_conn *conn)
-{
-    dma_free_coherent(global_pd->device->dma_device, 4096UL,
-                      conn->send_buf_local, conn->send_buf_dma);
-    dma_free_coherent(global_pd->device->dma_device, 4096UL,
-                      conn->recv_buf_local, conn->recv_buf_dma);
-}
-
 static void cleanup_connection(struct work_struct *ws)
 {
     struct krdma_conn *conn;
 
     conn = container_of(ws, struct krdma_conn, cleanup_connection_work);
 
-    free_msg(conn);
-
     rdma_destroy_qp(conn->cm_id);
     rdma_destroy_id(conn->cm_id);
+
+    krdma_msg_cache_put(conn->send_msg);
+    krdma_msg_cache_put(conn->recv_msg);
 
     spin_lock(&conn_list_lock);
     list_del_init(&conn->lh);
@@ -233,20 +177,30 @@ out:
 static int route_resolved(struct krdma_conn *conn)
 {
     int ret;
+    struct krdma_msg *send_msg, *recv_msg;
     const struct ib_recv_wr *bad_recv_wr;
     struct rdma_conn_param conn_param;
 
-    ret = allocate_msg(conn);
-    if (ret) {
-        pr_err("failed to allocate conn message buffers\n");
+    send_msg = krdma_msg_cache_get();
+    if (send_msg == NULL) {
+        pr_err("failed to get a krdma_msg from the cache\n");
         ret = -ENOMEM;
         goto out;
     }
+    conn->send_msg = send_msg;
 
-    ret = ib_post_recv(conn->cm_id->qp, &conn->recv_wr, &bad_recv_wr);
+    recv_msg = krdma_msg_cache_get();
+    if (recv_msg == NULL) {
+        pr_err("failed to get a krdma_msg from the cache\n");
+        ret = -ENOMEM;
+        goto out_put_send_msg;
+    }
+    conn->recv_msg = recv_msg;
+
+    ret = ib_post_recv(conn->cm_id->qp, &conn->recv_msg->recv_wr, &bad_recv_wr);
     if (ret) {
         pr_err("error on ib_post_recv: %d\n", ret);
-        goto out;
+        goto out_put_recv_msg;
     }
 
     memset(&conn_param, 0, sizeof(conn_param));
@@ -263,6 +217,10 @@ static int route_resolved(struct krdma_conn *conn)
 
     return 0;
 
+out_put_recv_msg:
+    krdma_msg_cache_put(recv_msg);
+out_put_send_msg:
+    krdma_msg_cache_put(send_msg);
 out:
     return ret;
 }
@@ -271,9 +229,10 @@ static int established_client(struct krdma_conn *conn)
 {
     DEBUG_LOG("established client: %p\n", conn->cm_id->device);
 
-    *((u64 *) conn->send_buf_local) = 113399;
+    *((u64 *) conn->send_msg->buf) = 113399;
+    DEBUG_LOG("[#1] handshake_client: %p, %p, %llu\n", conn->send_msg, conn->recv_msg, *((u64 *) conn->recv_msg->buf));
     handshake_client(conn);
-    DEBUG_LOG("handshake_client: %llu\n", *((u64 *) conn->recv_buf_local));
+    DEBUG_LOG("[#2] handshake_client: %p, %p, %llu\n", conn->send_msg, conn->recv_msg, *((u64 *) conn->recv_msg->buf));
 
     spin_lock(&conn_list_lock);
     list_add_tail(&conn->lh, &conn_list);
@@ -342,6 +301,7 @@ static int connect_request(struct rdma_cm_id *cm_id)
     struct krdma_conn *conn;
     struct ib_qp_init_attr qp_attr;
     const struct ib_recv_wr *bad_recv_wr;
+    struct krdma_msg *send_msg, *recv_msg;
     struct rdma_conn_param conn_param;
 
     conn = kzalloc(sizeof(*conn), GFP_KERNEL);
@@ -379,17 +339,26 @@ static int connect_request(struct rdma_cm_id *cm_id)
         goto out_kfree_conn;
     }
 
-    ret = allocate_msg(conn);
-    if (ret) {
-        pr_err("failed to allocate conn message buffers\n");
+    send_msg = krdma_msg_cache_get();
+    if (send_msg == NULL) {
+        pr_err("failed to get a krdma_msg from the cache\n");
         ret = -ENOMEM;
         goto out_destroy_qp;
     }
+    conn->send_msg = send_msg;
 
-    ret = ib_post_recv(conn->cm_id->qp, &conn->recv_wr, &bad_recv_wr);
+    recv_msg = krdma_msg_cache_get();
+    if (recv_msg == NULL) {
+        pr_err("failed to get a krdma_msg from the cache\n");
+        ret = -ENOMEM;
+        goto out_put_send_msg;
+    }
+    conn->recv_msg = recv_msg;
+
+    ret = ib_post_recv(conn->cm_id->qp, &conn->recv_msg->recv_wr, &bad_recv_wr);
     if (ret) {
         pr_err("error on ib_post_recv: %d\n", ret);
-        goto out_free_msg;
+        goto out_put_recv_msg;
     }
 
     memset(&conn_param, 0, sizeof(conn_param));
@@ -399,13 +368,15 @@ static int connect_request(struct rdma_cm_id *cm_id)
     ret = rdma_accept(cm_id, &conn_param);
     if (ret) {
         pr_err("error on rdma_accept: %d\n", ret);
-        goto out_free_msg;
+        goto out_put_recv_msg;
     }
 
     return 0;
 
-out_free_msg:
-    free_msg(conn);
+out_put_recv_msg:
+    krdma_msg_cache_put(recv_msg);
+out_put_send_msg:
+    krdma_msg_cache_put(send_msg);
 out_destroy_qp:
     rdma_destroy_qp(conn->cm_id);
 out_kfree_conn:
@@ -418,9 +389,10 @@ static int established_server(struct krdma_conn *conn)
 {
     DEBUG_LOG("established server: %p\n", conn->cm_id->device);
 
-    *((u64 *) conn->send_buf_local) = 224488;
+    *((u64 *) conn->send_msg->buf) = 224488;
+    DEBUG_LOG("[#1] handshake_server: %p, %p, %llu\n", conn->send_msg, conn->recv_msg, *((u64 *) conn->recv_msg->buf));
     handshake_server(conn);
-    DEBUG_LOG("handshake_server: %llu\n", *((u64 *) conn->recv_buf_local));
+    DEBUG_LOG("[#2] handshake_server: %p, %p, %llu\n", conn->send_msg, conn->recv_msg, *((u64 *) conn->recv_msg->buf));
 
     spin_lock(&conn_list_lock);
     list_add_tail(&conn->lh, &conn_list);

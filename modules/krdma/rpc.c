@@ -181,6 +181,7 @@ struct krdma_msg *krdma_msg_cache_get(void)
 
     spin_lock(&rpc_message_pool.lock);
     msg = list_first_entry(&rpc_message_pool.lh, struct krdma_msg, lh);
+    list_del_init(&msg->lh);
     rpc_message_pool.size--;
     spin_unlock(&rpc_message_pool.lock);
 
