@@ -7,6 +7,7 @@
 
 #include <rack_dvs.h>
 #include <rack_vm.h>
+#include "debugfs.h"
 
 extern int g_debug;
 
@@ -22,6 +23,7 @@ static struct vm_operations_struct rack_vm_ops = {
 
 int rack_vm_mmap(struct file *fp, struct vm_area_struct *vma)
 {
+    int ret;
     u64 size_bytes, page_size, slab_size_bytes;
     struct rack_vm_region *region;
 
@@ -36,16 +38,27 @@ int rack_vm_mmap(struct file *fp, struct vm_area_struct *vma)
     region = rack_vm_alloc_region(size_bytes, PAGE_SIZE, 64 * MB);
     if (region == NULL) {
         pr_err("error on rack_vm_alloc_region\n");
+        ret = -EINVAL;
         goto out;
     }
 
     region->vma = vma;
+    region->pid = (u64) region->vma->vm_mm->owner->pid;
+
     vma->vm_private_data = (void *) region;
     vma->vm_ops = &rack_vm_ops;
     vma->vm_flags |= VM_MIXEDMAP;
 
+    ret = rack_vm_debugfs_add_region(region);
+    if (ret) {
+        pr_err("error on rack_dm_debugfs_add_region\n");
+        goto out_free_region;
+    }
+
     return 0;
 
+out_free_region:
+    rack_vm_free_region(region);
 out:
     return -EINVAL;
 }
@@ -57,6 +70,8 @@ void rack_vm_close(struct vm_area_struct *vma)
     DEBUG_LOG("rack_vm_close vma: %p\n", vma);
 
     region = (struct rack_vm_region *) vma->vm_private_data;
+
+    rack_vm_debugfs_del_region(region);
     rack_vm_free_region(region);
     vma->vm_private_data = NULL;
 

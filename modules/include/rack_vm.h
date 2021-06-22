@@ -20,8 +20,8 @@ enum rack_vm_event {
     RACK_VM_EVENT_PGFAULT_INACTIVE,
     RACK_VM_EVENT_IO_READ,
     RACK_VM_EVENT_IO_WRITE,
-    RACK_VM_EVENT_LOCAL_PAGE_ALLOC,
-    RACK_VM_EVENT_LOCAL_PAGE_FREE,
+    RACK_VM_EVENT_ALLOC_LOCAL_PAGE,
+    RACK_VM_EVENT_FREE_LOCAL_PAGE,
     RACK_VM_EVENT_RECLAIM_INACTIVE,
     RACK_VM_EVENT_RECLAIM_INACTIVE_MISS,
     RACK_VM_EVENT_RECLAIM_ACTIVE,
@@ -42,8 +42,8 @@ static const char * const rack_vm_events[] = {
     [RACK_VM_EVENT_PGFAULT_INACTIVE]        = "pgfault_inactive",
     [RACK_VM_EVENT_IO_READ]                 = "io_read",
     [RACK_VM_EVENT_IO_WRITE]                = "io_write",
-    [RACK_VM_EVENT_LOCAL_PAGE_ALLOC]        = "local_page_alloc",
-    [RACK_VM_EVENT_LOCAL_PAGE_FREE]         = "local_page_free",
+    [RACK_VM_EVENT_ALLOC_LOCAL_PAGE]        = "alloc_local_page",
+    [RACK_VM_EVENT_FREE_LOCAL_PAGE]         = "free_local_page",
     [RACK_VM_EVENT_RECLAIM_INACTIVE]        = "reclaim_inactive",
     [RACK_VM_EVENT_RECLAIM_INACTIVE_MISS]   = "reclaim_inactive_miss",
     [RACK_VM_EVENT_RECLAIM_ACTIVE]          = "reclaim_active",
@@ -79,19 +79,27 @@ struct rack_vm_page {
 };
 
 struct rack_vm_region {
+    u64 pid;
     u64 size;
     u64 page_size;
     u64 max_pages;
     atomic64_t page_count_limit;
     atomic64_t page_count;
+    bool full;
 
     struct rack_vm_page *pages;
     struct rack_vm_page_list active_list;
     struct rack_vm_page_list inactive_list;
 
     struct rack_dvs_region *dvsr;
+
     struct vm_area_struct *vma;
     struct rack_vm_event_count __percpu *stat;
+
+    struct dentry *dbgfs_root;
+    struct dentry *dbgfs_stat;
+    struct dentry *dbgfs_mem_limit;
+
     spinlock_t lock;
 };
 

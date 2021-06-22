@@ -4,6 +4,7 @@
 #include <krdma.h>
 #include <rack_dvs.h>
 #include <rack_vm.h>
+#include "debugfs.h"
 
 #define DEVICE_NAME "rack_vm"
 #define CLASS_NAME "rack_vm"
@@ -64,10 +65,19 @@ static int __init rack_vm_init(void)
     }
     rack_vm_device_data.device = rack_vm_device;
 
+    ret = rack_vm_debugfs_setup();
+    if (ret) {
+        pr_err("failed to setup debugfs\n");
+        goto out_device_destroy;
+    }
+
     pr_info("module loaded\n");
 
     return 0;
 
+out_device_destroy:
+    device_destroy(rack_vm_device_data.class,
+                   MKDEV(rack_vm_device_data.major_number, 0));
 out_class_destroy:
     class_destroy(rack_vm_class);
 out_unregister_chrdev:
@@ -78,6 +88,7 @@ out:
 
 static void __exit rack_vm_exit(void)
 {
+    rack_vm_debugfs_cleanup();
     device_destroy(rack_vm_device_data.class,
                    MKDEV(rack_vm_device_data.major_number, 0));
     class_destroy(rack_vm_device_data.class);

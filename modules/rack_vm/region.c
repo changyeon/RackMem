@@ -229,6 +229,7 @@ void *rack_vm_alloc_buf(struct rack_vm_region *region)
 
     if (page_count >= page_count_limit) {
         atomic64_dec(&region->page_count);
+        region->full = true;
         goto out;
     }
 
@@ -237,7 +238,7 @@ void *rack_vm_alloc_buf(struct rack_vm_region *region)
         pr_err("error on vmalloc_user\n");
         goto out;
     }
-    count_event(region, RACK_VM_EVENT_LOCAL_PAGE_ALLOC);
+    count_event(region, RACK_VM_EVENT_ALLOC_LOCAL_PAGE);
 
     return buf;
 
@@ -345,7 +346,7 @@ void rack_vm_free_region(struct rack_vm_region *region)
         rpage = &region->pages[i];
         if (rpage->buf) {
             vfree(rpage->buf);
-            count_event(region, RACK_VM_EVENT_LOCAL_PAGE_FREE);
+            count_event(region, RACK_VM_EVENT_FREE_LOCAL_PAGE);
         }
     }
 
