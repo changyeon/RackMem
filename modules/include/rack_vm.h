@@ -7,6 +7,8 @@
 #include <linux/mm_types.h>
 #include <linux/atomic.h>
 #include <linux/percpu-defs.h>
+#include <linux/dcache.h>
+#include <linux/workqueue.h>
 #include <rack_dvs.h>
 
 #define count_event(region, event) \
@@ -18,6 +20,10 @@ enum rack_vm_event {
     RACK_VM_EVENT_PGFAULT_WRITE,
     RACK_VM_EVENT_PGFAULT_COLLISION,
     RACK_VM_EVENT_PGFAULT_INACTIVE,
+    RACK_VM_EVENT_RECLAIM_FAST,
+    RACK_VM_EVENT_RECLAIM_SLOW,
+    RACK_VM_EVENT_BG_RECLAIM_TASK,
+    RACK_VM_EVENT_BG_RECLAIM,
     RACK_VM_EVENT_IO_READ,
     RACK_VM_EVENT_IO_WRITE,
     RACK_VM_EVENT_ALLOC_LOCAL_PAGE,
@@ -40,6 +46,10 @@ static const char * const rack_vm_events[] = {
     [RACK_VM_EVENT_PGFAULT_WRITE]           = "pgfualt_write",
     [RACK_VM_EVENT_PGFAULT_COLLISION]       = "pgfault_collision",
     [RACK_VM_EVENT_PGFAULT_INACTIVE]        = "pgfault_inactive",
+    [RACK_VM_EVENT_RECLAIM_FAST]            = "reclaim_fast",
+    [RACK_VM_EVENT_RECLAIM_SLOW]            = "reclaim_slow",
+    [RACK_VM_EVENT_BG_RECLAIM_TASK]         = "background_reclaim_task",
+    [RACK_VM_EVENT_BG_RECLAIM]              = "background_reclaim",
     [RACK_VM_EVENT_IO_READ]                 = "io_read",
     [RACK_VM_EVENT_IO_WRITE]                = "io_write",
     [RACK_VM_EVENT_ALLOC_LOCAL_PAGE]        = "alloc_local_page",
@@ -78,6 +88,11 @@ struct rack_vm_page {
     spinlock_t lock;
 };
 
+struct rack_vm_work {
+    struct work_struct ws;
+    struct rack_vm_region *region;
+};
+
 struct rack_vm_region {
     u64 pid;
     u64 size;
@@ -92,6 +107,8 @@ struct rack_vm_region {
     struct rack_vm_page_list inactive_list;
 
     struct rack_dvs_region *dvsr;
+
+    struct rack_vm_work reclaim_work;
 
     struct vm_area_struct *vma;
     struct rack_vm_event_count __percpu *stat;
@@ -117,6 +134,7 @@ void rack_vm_unmap(struct rack_vm_region *region, struct rack_vm_page *rpage);
 void *rack_vm_reclaim_active(struct rack_vm_region *region);
 void *rack_vm_reclaim_inactive(struct rack_vm_region *region);
 void *rack_vm_alloc_buf(struct rack_vm_region *region);
+int rack_vm_map_region(struct rack_vm_region *region, struct vm_area_struct *vma, struct vm_operations_struct *vm_ops);
 struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size, u64 slab_size_bytes);
 void rack_vm_free_region(struct rack_vm_region *region);
 

@@ -42,16 +42,15 @@ int rack_vm_mmap(struct file *fp, struct vm_area_struct *vma)
         goto out;
     }
 
-    region->vma = vma;
-    region->pid = (u64) region->vma->vm_mm->owner->pid;
-
-    vma->vm_private_data = (void *) region;
-    vma->vm_ops = &rack_vm_ops;
-    vma->vm_flags |= VM_MIXEDMAP;
+    ret = rack_vm_map_region(region, vma, &rack_vm_ops);
+    if (ret) {
+        pr_err("error on rack_vm_map_region\n");
+        goto out_free_region;
+    }
 
     ret = rack_vm_debugfs_add_region(region);
     if (ret) {
-        pr_err("error on rack_dm_debugfs_add_region\n");
+        pr_err("error on rack_vm_debugfs_add_region\n");
         goto out_free_region;
     }
 
@@ -75,6 +74,13 @@ void rack_vm_close(struct vm_area_struct *vma)
     rack_vm_free_region(region);
     vma->vm_private_data = NULL;
 
+}
+
+static inline void background_reclaim(struct rack_vm_region *region)
+{
+    if (region->full)
+        if (rack_vm_page_list_size(&region->inactive_list) < 1024)
+            schedule_work(&region->reclaim_work.ws);
 }
 
 vm_fault_t rack_vm_fault(struct vm_fault *vmf)
@@ -121,7 +127,7 @@ vm_fault_t rack_vm_fault(struct vm_fault *vmf)
         goto success_remap;
     }
 
-    /* Step 4: allocate a new page if the current page count is below than
+    /* Step 4: Allocate a new page if the current page count is below than
      * the threshold */
     rpage->buf = rack_vm_alloc_buf(region);
     if (rpage->buf)
@@ -129,8 +135,10 @@ vm_fault_t rack_vm_fault(struct vm_fault *vmf)
 
     /* Step 5: Try to reclaim a page from the inactive list */
     rpage->buf = rack_vm_reclaim_inactive(region);
-    if (rpage->buf)
+    if (rpage->buf) {
+        count_event(region, RACK_VM_EVENT_RECLAIM_FAST);
         goto success_reclaim;
+    }
 
     /* Step 6: Reclaim a page from the active list */
     rpage->buf = rack_vm_reclaim_active(region);
@@ -138,6 +146,7 @@ vm_fault_t rack_vm_fault(struct vm_fault *vmf)
         pr_err("failed to reclaim a page\n");
         goto out_unlock;
     }
+    count_event(region, RACK_VM_EVENT_RECLAIM_SLOW);
 
 success_reclaim:
     if (rpage->flags == RACK_VM_PAGE_IDLE) {
@@ -162,6 +171,8 @@ success_remap:
 
 success:
     spin_unlock(&rpage->lock);
+
+    background_reclaim(region);
 
     return VM_FAULT_NOPAGE;
 

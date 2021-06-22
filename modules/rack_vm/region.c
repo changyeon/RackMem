@@ -151,6 +151,20 @@ void rack_vm_unmap(struct rack_vm_region *region, struct rack_vm_page *rpage)
     count_event(region, RACK_VM_EVENT_UNMAP);
 }
 
+int rack_vm_map_region(struct rack_vm_region *region,
+                       struct vm_area_struct *vma,
+                       struct vm_operations_struct *vm_ops)
+{
+    region->vma = vma;
+    region->pid = (u64) region->vma->vm_mm->owner->pid;
+
+    vma->vm_private_data = (void *) region;
+    vma->vm_ops = vm_ops;
+    vma->vm_flags |= VM_MIXEDMAP;
+
+    return 0;
+}
+
 void *rack_vm_reclaim_active(struct rack_vm_region *region)
 {
     int ret;
@@ -190,7 +204,6 @@ out:
 
 void *rack_vm_reclaim_inactive(struct rack_vm_region *region)
 {
-    int ret;
     void *buf = NULL;
     struct rack_vm_page *rpage;
 
@@ -200,24 +213,25 @@ void *rack_vm_reclaim_inactive(struct rack_vm_region *region)
         spin_lock(&rpage->lock);
         if (likely(rpage->flags & RACK_VM_PAGE_INACTIVE)) {
             count_event(region, RACK_VM_EVENT_RECLAIM_INACTIVE);
-            ret = rack_vm_writeback(region, rpage);
-            if (ret) {
-                pr_err("error on rack_vm_writeback: %p\n", rpage);
-                rpage->flags = RACK_VM_PAGE_ERROR;
-                goto out;
-            }
             buf = rpage->buf;
             rpage->buf = NULL;
             rpage->flags = RACK_VM_PAGE_NOT_PRESENT;
         } else {
-            /* this page may be in ACTIVE state if this page is touched
-             * by another thread before we get the lock */
+            /*
+             * This page may be in ACTIVE state if the page is touched by
+             * another thread before we get the lock.
+             * In this case, the inactive_list size is decreased twice by this
+             * function and the pagefault handler.
+             * To make the size correct, we increment size by 1 here.
+             */
+            spin_lock(&region->inactive_list.lock);
+            region->inactive_list.size++;
+            spin_unlock(&region->inactive_list.lock);
             count_event(region, RACK_VM_EVENT_RECLAIM_INACTIVE_MISS);
         }
         spin_unlock(&rpage->lock);
     }
 
-out:
     return buf;
 }
 
@@ -244,6 +258,40 @@ void *rack_vm_alloc_buf(struct rack_vm_region *region)
 
 out:
     return NULL;
+}
+
+static void reclaim_active_pages(struct work_struct *ws)
+{
+    struct rack_vm_work *work;
+    struct rack_vm_region *region;
+    int i, ret;
+    struct rack_vm_page *rpage;
+
+    work = container_of(ws, struct rack_vm_work, ws);
+    region = work->region;
+
+    count_event(region, RACK_VM_EVENT_BG_RECLAIM_TASK);
+
+    for (i = 0; i < 16384; i++) {
+        rpage = rack_vm_page_list_pop(&region->active_list);
+        if (rpage == NULL) {
+            pr_err("failed to reclaim a page from active_list\n");
+            break;
+        }
+        spin_lock(&rpage->lock);
+        rack_vm_unmap(region, rpage);
+        ret = rack_vm_writeback(region, rpage);
+        if (ret) {
+            pr_err("error on rack_vm_writeback: %p\n", rpage);
+            rpage->flags = RACK_VM_PAGE_ERROR;
+            spin_unlock(&rpage->lock);
+            break;
+        }
+        rack_vm_page_list_add(&region->inactive_list, rpage);
+        spin_unlock(&rpage->lock);
+
+        count_event(region, RACK_VM_EVENT_BG_RECLAIM);
+    }
 }
 
 struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
@@ -306,6 +354,10 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
     }
     rack_vm_page_list_init(&region->active_list);
     rack_vm_page_list_init(&region->inactive_list);
+
+    region->reclaim_work.region = region;
+    INIT_WORK(&region->reclaim_work.ws, reclaim_active_pages);
+
     region->dvsr = dvsr;
     region->stat = alloc_percpu(struct rack_vm_event_count);
     spin_lock_init(&region->lock);
