@@ -25,6 +25,10 @@ int g_local_pages = 65536;
 module_param_named(local_pages, g_local_pages, int, 0);
 MODULE_PARM_DESC(local_pages, "the number of local pages for caching");
 
+unsigned long g_slab_size_bytes = 67108864UL;
+module_param_named(slab_size_bytes, g_slab_size_bytes, ulong, 0);
+MODULE_PARM_DESC(glab_size_bytes, "the slab size in bytes");
+
 static struct rack_vm_device_data {
     int major_number;
     struct class *class;
@@ -75,8 +79,8 @@ static int __init rack_vm_init(void)
         goto out_device_destroy;
     }
 
-    pr_info("module loaded: (%d, %d, %d)\n", g_debug, g_page_size,
-            g_local_pages);
+    pr_info("module loaded: (%d, %d, %d, %lu)\n", g_debug, g_page_size,
+            g_local_pages, g_slab_size_bytes);
 
     return 0;
 

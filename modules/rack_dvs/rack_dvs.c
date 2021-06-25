@@ -31,7 +31,7 @@ int rack_dvs_io(struct rack_dvs_region *region, u64 offset, u64 size,
     DEBUG_LOG("rack_dvs_io region: %p, offset: %llu, size: %llu, buf: %p, "
               "dir: %d\n", region, offset, size, buf, dir);
 
-    slab_size_bytes = region->slab_size_mb * MB;
+    slab_size_bytes = region->slab_size_bytes;
     slab_index = offset / slab_size_bytes;
     slab_offset = offset % slab_size_bytes;
 
@@ -74,25 +74,16 @@ EXPORT_SYMBOL(rack_dvs_io);
 /**
  * rack_dvs_alloc_region - allocate a region from the registered devices
  */
-struct rack_dvs_region *rack_dvs_alloc_region(u64 size_mb, u64 slab_size_mb)
+struct rack_dvs_region *rack_dvs_alloc_region(u64 size_bytes,
+                                              u64 slab_size_bytes)
 {
     u64 i, nr_slabs;
     struct rack_dvs_region *region;
 
-    if (size_mb % slab_size_mb) {
-        pr_err("the region size required to be multiple of the slab size\n");
-        goto out;
-    }
+    nr_slabs = size_bytes / slab_size_bytes;
 
-    if (size_mb < slab_size_mb) {
-        pr_info("the requested size is smaller than the slab size\n");
-        size_mb = slab_size_mb;
-    }
-
-    nr_slabs = size_mb / slab_size_mb;
-
-    DEBUG_LOG("rack_dvs_alloc_region size_mb: %llu, slab_size_mb: %llu, "
-              "nr_slabs: %llu\n", size_mb, slab_size_mb, nr_slabs);
+    DEBUG_LOG("rack_dvs_alloc_region size_bytes: %llu, slab_size_bytes: %llu, "
+              "nr_slabs: %llu\n", size_bytes, slab_size_bytes, nr_slabs);
 
     region = kzalloc(sizeof(*region), GFP_KERNEL);
     if (region == NULL) {
@@ -100,11 +91,11 @@ struct rack_dvs_region *rack_dvs_alloc_region(u64 size_mb, u64 slab_size_mb)
         goto out;
     }
 
-    region->size_mb = size_mb;
-    region->slab_size_mb = slab_size_mb;
+    region->size_bytes = size_bytes;
+    region->slab_size_bytes = slab_size_bytes;
     region->nr_slabs = nr_slabs;
 
-    region->slabs = kzalloc(nr_slabs * sizeof(*region->slabs), GFP_KERNEL);
+    region->slabs = vzalloc(nr_slabs * sizeof(struct dvs_slab));
     if (region->slabs == NULL) {
         pr_err("failed to allocate memory for region->slabs\n");
         goto out_kfree_region;
@@ -114,7 +105,7 @@ struct rack_dvs_region *rack_dvs_alloc_region(u64 size_mb, u64 slab_size_mb)
         spin_lock_init(&region->slabs[i].lock);
 
     DEBUG_LOG("rack_dvs_alloc_region size: %llumb, slab_size: %llumb (%p)\n",
-              region->size_mb, region->slab_size_mb, region);
+              region->size_bytes, region->slab_size_bytes, region);
 
     return region;
 
@@ -143,7 +134,7 @@ void rack_dvs_free_region(struct rack_dvs_region *region)
         spin_unlock(&slab->lock);
     }
 
-    kfree(region->slabs);
+    vfree(region->slabs);
     kfree(region);
 }
 EXPORT_SYMBOL(rack_dvs_free_region);

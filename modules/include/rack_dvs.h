@@ -1,7 +1,7 @@
 #ifndef _INCLUDE_RACK_DVS_H_
 #define _INCLUDE_RACK_DVS_H_
 
-#define DVS_SLAB_SIZE_MB    64UL
+#define DVS_SLAB_SIZE_BYTES 67108864UL
 
 #define MB                  (1UL << 20UL)
 #define GB                  (1UL << 30UL)
@@ -28,8 +28,8 @@ struct rack_dvs_ops {
 };
 
 struct rack_dvs_region {
-    u64 size_mb;
-    u64 slab_size_mb;
+    u64 size_bytes;
+    u64 slab_size_bytes;
     u64 nr_slabs;
     struct dvs_slab *slabs;
 };
@@ -49,7 +49,7 @@ int dvs_test_single_thread_correctness(void);
  */
 int rack_dvs_io(struct rack_dvs_region *region, u64 offset, u64 size,
                 void *buf, int dir);
-struct rack_dvs_region *rack_dvs_alloc_region(u64 size_mb, u64 slab_size_mb);
+struct rack_dvs_region *rack_dvs_alloc_region(u64 size_bytes, u64 slab_size_bytes);
 void rack_dvs_free_region(struct rack_dvs_region *region);
 int rack_dvs_register_dev(struct rack_dvs_dev *dev);
 void rack_dvs_unregister_dev(struct rack_dvs_dev *dev);

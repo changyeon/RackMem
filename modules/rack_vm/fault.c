@@ -11,6 +11,7 @@
 
 extern int g_debug;
 extern int g_page_size;
+extern int g_slab_size_bytes;
 
 #define DEBUG_LOG if (g_debug) pr_info
 
@@ -30,13 +31,27 @@ int rack_vm_mmap(struct file *fp, struct vm_area_struct *vma)
 
     size_bytes = vma->vm_end - vma->vm_start;
     page_size = g_page_size;
-    slab_size_bytes = 64ULL * MB;
+    slab_size_bytes = g_slab_size_bytes;
+
+    if (slab_size_bytes < page_size) {
+        pr_err("the slab size is smaller than the page size "
+               "(%llu, %llu)\n", slab_size_bytes, page_size);
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if (slab_size_bytes % page_size) {
+        pr_err("the slab size is not a multiple of the page size "
+               "(%llu, %llu)\n", slab_size_bytes, page_size);
+        ret = -EINVAL;
+        goto out;
+    }
 
     DEBUG_LOG("rack_vm_mmap size: %llu, page_size: %llu, "
               "slab_size_bytes: %llu, vma: %p\n", size_bytes, page_size,
               slab_size_bytes, vma);
 
-    region = rack_vm_alloc_region(size_bytes, g_page_size, 64 * MB);
+    region = rack_vm_alloc_region(size_bytes, page_size, slab_size_bytes);
     if (region == NULL) {
         pr_err("error on rack_vm_alloc_region\n");
         ret = -EINVAL;

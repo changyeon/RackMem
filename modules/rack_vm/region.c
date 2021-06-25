@@ -297,7 +297,7 @@ static void reclaim_active_pages(struct work_struct *ws)
 struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
                                             u64 slab_size_bytes)
 {
-    u64 i, total_size_bytes;
+    u64 i;
     struct rack_vm_region *region = NULL;
     struct rack_dvs_region *dvsr;
 
@@ -305,25 +305,7 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
               "slab_size_bytes: %llu\n", size_bytes, page_size,
               slab_size_bytes);
 
-    total_size_bytes = (size_bytes / slab_size_bytes) * slab_size_bytes;
-    if (size_bytes % slab_size_bytes) {
-        total_size_bytes += slab_size_bytes;
-        pr_info("round up the region size %llu -> %llu\n", size_bytes,
-                total_size_bytes);
-    }
-
-    if (total_size_bytes % page_size) {
-        pr_err("the total_size_bytes is not multiple of page_size (%llu,%llu)\n",
-               total_size_bytes, page_size);
-        goto out;
-    }
-
-    if (slab_size_bytes % MB) {
-        pr_err("the slab size is not multiple of MB: %llu\n", slab_size_bytes);
-        goto out;
-    }
-
-    dvsr = rack_dvs_alloc_region(total_size_bytes / MB, slab_size_bytes / MB);
+    dvsr = rack_dvs_alloc_region(size_bytes, slab_size_bytes);
     if (dvsr == NULL) {
         pr_err("error on dvs_alloc_region\n");
         goto out;
@@ -335,9 +317,9 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
         goto out_rack_dvs_free_region;
     }
 
-    region->size = total_size_bytes;
+    region->size = size_bytes;
     region->page_size = page_size;
-    region->max_pages = total_size_bytes / page_size;
+    region->max_pages = size_bytes / page_size;
 
     atomic64_set(&region->page_count_limit, g_local_pages);
     atomic64_set(&region->page_count, 0);
