@@ -10,6 +10,7 @@
 #include "debugfs.h"
 
 extern int g_debug;
+extern int g_page_size;
 
 #define DEBUG_LOG if (g_debug) pr_info
 
@@ -28,14 +29,14 @@ int rack_vm_mmap(struct file *fp, struct vm_area_struct *vma)
     struct rack_vm_region *region;
 
     size_bytes = vma->vm_end - vma->vm_start;
-    page_size = PAGE_SIZE;
+    page_size = g_page_size;
     slab_size_bytes = 64ULL * MB;
 
     DEBUG_LOG("rack_vm_mmap size: %llu, page_size: %llu, "
               "slab_size_bytes: %llu, vma: %p\n", size_bytes, page_size,
               slab_size_bytes, vma);
 
-    region = rack_vm_alloc_region(size_bytes, PAGE_SIZE, 64 * MB);
+    region = rack_vm_alloc_region(size_bytes, g_page_size, 64 * MB);
     if (region == NULL) {
         pr_err("error on rack_vm_alloc_region\n");
         ret = -EINVAL;

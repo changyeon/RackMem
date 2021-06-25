@@ -17,6 +17,10 @@ int g_debug = 0;
 module_param_named(debug, g_debug, int, 0);
 MODULE_PARM_DESC(debug, "enable debug mode");
 
+int g_page_size = PAGE_SIZE;
+module_param_named(page_size, g_page_size, int, 0);
+MODULE_PARM_DESC(page_size, "RackVM page size");
+
 int g_local_pages = 65536;
 module_param_named(local_pages, g_local_pages, int, 0);
 MODULE_PARM_DESC(local_pages, "the number of local pages for caching");
@@ -71,7 +75,8 @@ static int __init rack_vm_init(void)
         goto out_device_destroy;
     }
 
-    pr_info("module loaded\n");
+    pr_info("module loaded: (%d, %d, %d)\n", g_debug, g_page_size,
+            g_local_pages);
 
     return 0;
 
