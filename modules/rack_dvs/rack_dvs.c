@@ -4,6 +4,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <rack_dvs.h>
+#include <rack_dvs.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("RackMem distributed virtual storage");
@@ -21,39 +22,46 @@ static DEFINE_SPINLOCK(dvs_dev_list_lock);
 /**
  * rack_dvs_io - handle I/O request on the region
  */
-int rack_dvs_io(struct rack_dvs_region *region, u64 offset, u64 size,
+int rack_dvs_io(struct rack_dvs_region *region, u64 region_offset, u64 size,
                 void *buf, int dir)
 {
     int ret = 0;
-    u64 slab_size_bytes, slab_index, slab_offset;
+    u64 slab_index, slab_offset;
+    struct dvs_slot *slot;
     struct dvs_slab *slab;
+    struct rack_dvs_dev *dev;
 
     DEBUG_LOG("rack_dvs_io region: %p, offset: %llu, size: %llu, buf: %p, "
-              "dir: %d\n", region, offset, size, buf, dir);
+              "dir: %d\n", region, region_offset, size, buf, dir);
 
-    slab_size_bytes = region->slab_size_bytes;
-    slab_index = offset / slab_size_bytes;
-    slab_offset = offset % slab_size_bytes;
+    slab_index = region_offset / region->slab_size_bytes;
+    slab_offset = region_offset % region->slab_size_bytes;
 
-    slab = &region->slabs[slab_index];
-    spin_lock(&slab->lock);
-    if (slab->dev == NULL) {
+    slot = &region->slots[slab_index];
+    spin_lock(&slot->lock);
+    slab = slot->slab;
+    if (slab == NULL) {
+        /* allocate a new slab for this slot */
         if (list_empty(&dvs_dev_list)) {
             pr_err("no available device\n");
+            spin_unlock(&slot->lock);
+            ret = -EINVAL;
+            goto out;
+        }
+
+        /* FIXME: we only use the first device! */
+        dev = list_first_entry(&dvs_dev_list, struct rack_dvs_dev, head);
+        slab = dev->dvs_ops->alloc(region->slab_size_bytes);
+        if (slab == NULL) {
+            pr_err("failed to allocate a slab from dev: %p\n", dev);
+            spin_unlock(&slot->lock);
             ret = -ENOMEM;
-            spin_unlock(&slab->lock);
             goto out;
         }
-        slab->dev = list_first_entry(&dvs_dev_list, struct rack_dvs_dev, head);
-        ret = slab->dev->dvs_ops->alloc(slab, slab_size_bytes);
-        if (ret) {
-            pr_err("error on dvs_ops->alloc: %d\n", ret);
-            spin_unlock(&slab->lock);
-            goto out;
-        }
+        slot->slab = slab;
         count_event(region, RACK_DVS_EVENT_SLAB_ALLOC);
     }
-    spin_unlock(&slab->lock);
+    spin_unlock(&slot->lock);
 
     if (dir == READ) {
         ret = slab->dev->dvs_ops->read(slab, slab_offset, size, buf);
@@ -81,14 +89,14 @@ EXPORT_SYMBOL(rack_dvs_io);
 struct rack_dvs_region *rack_dvs_alloc_region(u64 size_bytes,
                                               u64 slab_size_bytes)
 {
-    u64 i, nr_slabs;
-    struct dvs_slab *slab;
+    u64 i, nr_slots;
     struct rack_dvs_region *region;
+    struct dvs_slot *slot;
 
-    nr_slabs = size_bytes / slab_size_bytes;
+    nr_slots = size_bytes / slab_size_bytes;
 
     DEBUG_LOG("rack_dvs_alloc_region size_bytes: %llu, slab_size_bytes: %llu, "
-              "nr_slabs: %llu\n", size_bytes, slab_size_bytes, nr_slabs);
+              "nr_slots: %llu\n", size_bytes, slab_size_bytes, nr_slots);
 
     region = kzalloc(sizeof(*region), GFP_KERNEL);
     if (region == NULL) {
@@ -98,16 +106,18 @@ struct rack_dvs_region *rack_dvs_alloc_region(u64 size_bytes,
 
     region->size_bytes = size_bytes;
     region->slab_size_bytes = slab_size_bytes;
-    region->nr_slabs = nr_slabs;
+    region->nr_slots = nr_slots;
 
-    region->slabs = vzalloc(nr_slabs * sizeof(struct dvs_slab));
-    if (region->slabs == NULL) {
-        pr_err("failed to allocate memory for region->slabs\n");
+    region->slots = vzalloc(nr_slots * sizeof(*region->slots));
+    if (region->slots == NULL) {
+        pr_err("failed to allocate memory for region->slots\n");
         goto out_kfree_region;
     }
 
-    for (i = 0; i < nr_slabs; i++)
-        spin_lock_init(&region->slabs[i].lock);
+    for (i = 0; i < nr_slots; i++) {
+        region->slots[i].slab = NULL;
+        spin_lock_init(&region->slots[i].lock);
+    }
 
     region->stat = alloc_percpu(struct rack_dvs_event_count);
     if (region->stat == NULL) {
@@ -115,22 +125,19 @@ struct rack_dvs_region *rack_dvs_alloc_region(u64 size_bytes,
         goto out_free_slabs;
     }
 
-    DEBUG_LOG("rack_dvs_alloc_region size: %llumb, slab_size: %llumb (%p)\n",
-              region->size_bytes, region->slab_size_bytes, region);
-
     return region;
 
 out_free_slabs:
-    for (i = 0; i < region->nr_slabs; i++) {
-        slab = &region->slabs[i];
-        spin_lock(&slab->lock);
-        if (slab->private) {
-            slab->dev->dvs_ops->free(slab);
+    for (i = 0; i < region->nr_slots; i++) {
+        slot = &region->slots[i];
+        spin_lock(&slot->lock);
+        if (slot->slab) {
+            slot->slab->dev->dvs_ops->free(slot->slab);
             count_event(region, RACK_DVS_EVENT_SLAB_FREE);
         }
-        spin_unlock(&slab->lock);
+        spin_unlock(&slot->lock);
     }
-    vfree(region->slabs);
+    vfree(region->slots);
 out_kfree_region:
     kfree(region);
 out:
@@ -160,24 +167,24 @@ static void print_statistics(struct rack_dvs_region *region)
 void rack_dvs_free_region(struct rack_dvs_region *region)
 {
     u64 i;
-    struct dvs_slab *slab;
+    struct dvs_slot *slot;
 
     DEBUG_LOG("rack_dvs_free_region region: %p\n", region);
 
-    for (i = 0; i < region->nr_slabs; i++) {
-        slab = &region->slabs[i];
-        spin_lock(&slab->lock);
-        if (slab->private) {
-            slab->dev->dvs_ops->free(slab);
+    for (i = 0; i < region->nr_slots; i++) {
+        slot = &region->slots[i];
+        spin_lock(&slot->lock);
+        if (slot->slab) {
+            slot->slab->dev->dvs_ops->free(slot->slab);
             count_event(region, RACK_DVS_EVENT_SLAB_FREE);
         }
-        spin_unlock(&slab->lock);
+        spin_unlock(&slot->lock);
     }
 
     print_statistics(region);
     free_percpu(region->stat);
 
-    vfree(region->slabs);
+    vfree(region->slots);
     kfree(region);
 }
 EXPORT_SYMBOL(rack_dvs_free_region);

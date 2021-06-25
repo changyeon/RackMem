@@ -4,6 +4,7 @@
 #include <linux/list.h>
 #include <linux/spinlock.h>
 #include <linux/percpu.h>
+#include <linux/completion.h>
 
 #define MB                  (1UL << 20UL)
 #define GB                  (1UL << 30UL)
@@ -38,11 +39,15 @@ struct rack_dvs_dev {
 struct dvs_slab {
     struct rack_dvs_dev *dev;
     void *private;
+};
+
+struct dvs_slot {
+    struct dvs_slab *slab;
     spinlock_t lock;
 };
 
 struct rack_dvs_ops {
-    int (*alloc)(struct dvs_slab *slab, u64 size);
+    struct dvs_slab *(*alloc)(u64 size);
     void (*free)(struct dvs_slab *slab);
     int (*read)(struct dvs_slab *slab, u64 offset, u64 size, void *dst);
     int (*write)(struct dvs_slab *slab, u64 offset, u64 size, void *src);
@@ -51,8 +56,8 @@ struct rack_dvs_ops {
 struct rack_dvs_region {
     u64 size_bytes;
     u64 slab_size_bytes;
-    u64 nr_slabs;
-    struct dvs_slab *slabs;
+    u64 nr_slots;
+    struct dvs_slot *slots;
     struct rack_dvs_event_count __percpu *stat;
 };
 

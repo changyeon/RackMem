@@ -19,7 +19,7 @@ struct dram_slab {
     void *buf;
 };
 
-static int dram_alloc(struct dvs_slab *slab, u64 size);
+static struct dvs_slab *dram_alloc(u64 size);
 static void dram_free(struct dvs_slab *slab);
 static int dram_read(struct dvs_slab *slab, u64 offset, u64 size, void *dst);
 static int dram_write(struct dvs_slab *slab, u64 offset, u64 size, void *src);
@@ -35,35 +35,45 @@ static struct rack_dvs_dev dram_dev = {
     .dvs_ops = &dram_ops
 };
 
-static int dram_alloc(struct dvs_slab *slab, u64 size)
+static struct dvs_slab *dram_alloc(u64 size)
 {
     int ret = 0;
+    struct dvs_slab *dvs_slab;
     struct dram_slab *dram_slab;
 
-    DEBUG_LOG("dram_alloc slab: %p, size: %llu\n", slab, size);
+    DEBUG_LOG("dram_alloc size: %llu\n", size);
 
-    dram_slab = kzalloc(sizeof(*slab), GFP_KERNEL);
+    dvs_slab = kzalloc(sizeof(*dvs_slab), GFP_KERNEL);
+    if (dvs_slab == NULL) {
+        pr_err("failed to allocate memory for dvs_slab\n");
+        goto out;
+    }
+
+    dram_slab = kzalloc(sizeof(*dram_slab), GFP_KERNEL);
     if (dram_slab == NULL) {
        pr_err("failed to allocate memory for dram_slab\n");
        ret = -ENOMEM;
-       goto out;
+       goto out_kfree_dvs_slab;
     }
 
     dram_slab->buf = vzalloc(size);
     if (dram_slab->buf == NULL) {
         pr_err("failed to allocate memory for dram_slab->buf\n");
-       ret = -ENOMEM;
-        goto out_kfree_slab;
+        goto out_kfree_dram_slab;
     }
 
-    slab->private = (void *) dram_slab;
+    INIT_LIST_HEAD(&dvs_slab->head);
+    dvs_slab->dev = &dram_dev;
+    dvs_slab->private = (void *) dram_slab;
 
-    return 0;
+    return dvs_slab;
 
-out_kfree_slab:
+out_kfree_dram_slab:
     kfree(dram_slab);
+out_kfree_dvs_slab:
+    kfree(dvs_slab);
 out:
-    return ret;
+    return NULL;
 }
 
 static void dram_free(struct dvs_slab *slab)
@@ -75,6 +85,7 @@ static void dram_free(struct dvs_slab *slab)
     dram_slab = (struct dram_slab *) slab->private;
     vfree(dram_slab->buf);
     kfree(dram_slab);
+    kfree(slab);
 }
 
 /**
