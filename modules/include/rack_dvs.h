@@ -1,13 +1,34 @@
 #ifndef _INCLUDE_RACK_DVS_H_
 #define _INCLUDE_RACK_DVS_H_
 
-#define DVS_SLAB_SIZE_BYTES 67108864UL
+#include <linux/list.h>
+#include <linux/spinlock.h>
+#include <linux/percpu.h>
 
 #define MB                  (1UL << 20UL)
 #define GB                  (1UL << 30UL)
 
-#include <linux/list.h>
-#include <linux/spinlock.h>
+#define count_event(region, event) \
+    this_cpu_inc(region->stat->count[event])
+
+enum rack_dvs_event {
+    RACK_DVS_EVENT_SLAB_ALLOC,
+    RACK_DVS_EVENT_SLAB_FREE,
+    RACK_DVS_EVENT_SLAB_READ,
+    RACK_DVS_EVENT_SLAB_WRITE,
+    __NR_RACK_DVS_EVENTS
+};
+
+struct rack_dvs_event_count {
+    u64 count[__NR_RACK_DVS_EVENTS];
+};
+
+static const char * const rack_dvs_events[] = {
+    [RACK_DVS_EVENT_SLAB_ALLOC]                 = "slab_alloc",
+    [RACK_DVS_EVENT_SLAB_FREE]                  = "slab_free",
+    [RACK_DVS_EVENT_SLAB_READ]                  = "slab_read",
+    [RACK_DVS_EVENT_SLAB_WRITE]                 = "slab_write",
+};
 
 struct rack_dvs_dev {
     struct list_head head;
@@ -32,6 +53,7 @@ struct rack_dvs_region {
     u64 slab_size_bytes;
     u64 nr_slabs;
     struct dvs_slab *slabs;
+    struct rack_dvs_event_count __percpu *stat;
 };
 
 #define rack_dvs_read(region, offset, size, dst) \

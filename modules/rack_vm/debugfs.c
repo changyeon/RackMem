@@ -20,19 +20,24 @@ struct rack_vm_region_dbgfs {
 
 static int rack_vm_stat_print(struct seq_file *f, void *v)
 {
-    int i, cpu;
+    int i, j, cpu;
     struct rack_vm_region *region;
-    u64 sum[__NR_RACK_VM_EVENTS];
+    u64 sum[__NR_RACK_VM_EVENTS + __NR_RACK_DVS_EVENTS];
 
     region = (struct rack_vm_region *) f->private;
 
     memset(sum, 0, sizeof(sum));
-    for_each_online_cpu(cpu)
+    for_each_online_cpu(cpu) {
         for (i = 0; i < __NR_RACK_VM_EVENTS; i++)
-            sum[i] += per_cpu(region->stat->count[i], cpu);
+            sum[i]   += per_cpu(region->stat->count[i], cpu);
+        for (j = 0; j < __NR_RACK_DVS_EVENTS; j++)
+            sum[i+j] += per_cpu(region->dvsr->stat->count[j], cpu);
+    }
 
     for (i = 0; i < __NR_RACK_VM_EVENTS; i++)
         seq_printf(f, "%s: %llu\n", rack_vm_events[i], sum[i]);
+    for (j = 0; j < __NR_RACK_DVS_EVENTS; j++)
+        seq_printf(f, "%s: %llu\n", rack_dvs_events[j], sum[i+j]);
 
     seq_printf(f, "region_size: %llu\n", region->size);
     seq_printf(f, "region_page_size: %llu\n", region->page_size);

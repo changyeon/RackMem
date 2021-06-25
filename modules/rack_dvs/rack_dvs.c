@@ -51,13 +51,17 @@ int rack_dvs_io(struct rack_dvs_region *region, u64 offset, u64 size,
             spin_unlock(&slab->lock);
             goto out;
         }
+        count_event(region, RACK_DVS_EVENT_SLAB_ALLOC);
     }
     spin_unlock(&slab->lock);
 
-    if (dir == READ)
+    if (dir == READ) {
         ret = slab->dev->dvs_ops->read(slab, slab_offset, size, buf);
-    else
+        count_event(region, RACK_DVS_EVENT_SLAB_READ);
+    } else {
         ret = slab->dev->dvs_ops->write(slab, slab_offset, size, buf);
+        count_event(region, RACK_DVS_EVENT_SLAB_WRITE);
+    }
 
     if (ret) {
         pr_err("error on dvs_io: %d\n", ret);
@@ -78,6 +82,7 @@ struct rack_dvs_region *rack_dvs_alloc_region(u64 size_bytes,
                                               u64 slab_size_bytes)
 {
     u64 i, nr_slabs;
+    struct dvs_slab *slab;
     struct rack_dvs_region *region;
 
     nr_slabs = size_bytes / slab_size_bytes;
@@ -104,17 +109,50 @@ struct rack_dvs_region *rack_dvs_alloc_region(u64 size_bytes,
     for (i = 0; i < nr_slabs; i++)
         spin_lock_init(&region->slabs[i].lock);
 
+    region->stat = alloc_percpu(struct rack_dvs_event_count);
+    if (region->stat == NULL) {
+        pr_err("failed to allocate percpu event array\n");
+        goto out_free_slabs;
+    }
+
     DEBUG_LOG("rack_dvs_alloc_region size: %llumb, slab_size: %llumb (%p)\n",
               region->size_bytes, region->slab_size_bytes, region);
 
     return region;
 
+out_free_slabs:
+    for (i = 0; i < region->nr_slabs; i++) {
+        slab = &region->slabs[i];
+        spin_lock(&slab->lock);
+        if (slab->private) {
+            slab->dev->dvs_ops->free(slab);
+            count_event(region, RACK_DVS_EVENT_SLAB_FREE);
+        }
+        spin_unlock(&slab->lock);
+    }
+    vfree(region->slabs);
 out_kfree_region:
     kfree(region);
 out:
     return NULL;
 }
 EXPORT_SYMBOL(rack_dvs_alloc_region);
+
+static void print_statistics(struct rack_dvs_region *region)
+{
+    int i, cpu;
+    u64 sum[__NR_RACK_DVS_EVENTS];
+
+    memset(sum, 0, sizeof(sum));
+
+    for_each_online_cpu(cpu)
+        for (i = 0; i < __NR_RACK_DVS_EVENTS; i++)
+            sum[i] += per_cpu(region->stat->count[i], cpu);
+
+    for (i = 0; i < __NR_RACK_DVS_EVENTS; i++)
+        pr_info("event_count (%p) %s: %llu\n", region, rack_dvs_events[i],
+                sum[i]);
+}
 
 /**
  * rack_dvs_free_region - free dvs_region
@@ -129,10 +167,15 @@ void rack_dvs_free_region(struct rack_dvs_region *region)
     for (i = 0; i < region->nr_slabs; i++) {
         slab = &region->slabs[i];
         spin_lock(&slab->lock);
-        if (slab->private)
+        if (slab->private) {
             slab->dev->dvs_ops->free(slab);
+            count_event(region, RACK_DVS_EVENT_SLAB_FREE);
+        }
         spin_unlock(&slab->lock);
     }
+
+    print_statistics(region);
+    free_percpu(region->stat);
 
     vfree(region->slabs);
     kfree(region);

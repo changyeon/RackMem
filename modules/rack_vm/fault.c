@@ -167,6 +167,7 @@ vm_fault_t rack_vm_fault(struct vm_fault *vmf)
 success_reclaim:
     if (rpage->flags == RACK_VM_PAGE_IDLE) {
         /* this is the first access on this page! */
+        count_event(region, RACK_VM_EVENT_ACCSSED);
         goto success_remap;
     }
 

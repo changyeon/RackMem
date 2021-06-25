@@ -3,6 +3,7 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
+#include <linux/percpu.h>
 #include <rack_vm.h>
 
 extern int g_debug;
@@ -341,11 +342,19 @@ struct rack_vm_region *rack_vm_alloc_region(u64 size_bytes, u64 page_size,
     INIT_WORK(&region->reclaim_work.ws, reclaim_active_pages);
 
     region->dvsr = dvsr;
+
     region->stat = alloc_percpu(struct rack_vm_event_count);
+    if (region->stat == NULL) {
+        pr_err("failed to allocate percpu event array\n");
+        goto out_free_region_pages;
+    }
+
     spin_lock_init(&region->lock);
 
     return region;
 
+out_free_region_pages:
+    vfree(region->pages);
 out_kfree_region:
     kfree(region);
 out_rack_dvs_free_region:
@@ -354,18 +363,19 @@ out:
     return NULL;
 }
 
-static void rack_vm_print_statistics(struct rack_vm_region *region)
+static void print_statistics(struct rack_vm_region *region)
 {
     int i, cpu;
     u64 sum[__NR_RACK_VM_EVENTS];
 
     memset(sum, 0, sizeof(sum));
+
     for_each_online_cpu(cpu)
         for (i = 0; i < __NR_RACK_VM_EVENTS; i++)
             sum[i] += per_cpu(region->stat->count[i], cpu);
 
     for (i = 0; i < __NR_RACK_VM_EVENTS; i++)
-        pr_info("statistics (%p) %s: %llu\n", region, rack_vm_events[i],
+        pr_info("event_count (%p) %s: %llu\n", region, rack_vm_events[i],
                 sum[i]);
 }
 
@@ -384,9 +394,9 @@ void rack_vm_free_region(struct rack_vm_region *region)
         }
     }
 
-    rack_vm_print_statistics(region);
+    print_statistics(region);
     free_percpu(region->stat);
-    rack_dvs_free_region(region->dvsr);
     vfree(region->pages);
     kfree(region);
+    rack_dvs_free_region(region->dvsr);
 };
