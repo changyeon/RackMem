@@ -15,6 +15,9 @@
 enum rack_dvs_event {
     RACK_DVS_EVENT_SLAB_ALLOC,
     RACK_DVS_EVENT_SLAB_FREE,
+    RACK_DVS_EVENT_GET_SLAB_FAST,
+    RACK_DVS_EVENT_GET_SLAB_SLOW,
+    RACK_DVS_EVENT_UPDATE_SLAB_POOL,
     RACK_DVS_EVENT_SLAB_READ,
     RACK_DVS_EVENT_SLAB_WRITE,
     __NR_RACK_DVS_EVENTS
@@ -27,18 +30,29 @@ struct rack_dvs_event_count {
 static const char * const rack_dvs_events[] = {
     [RACK_DVS_EVENT_SLAB_ALLOC]                 = "slab_alloc",
     [RACK_DVS_EVENT_SLAB_FREE]                  = "slab_free",
+    [RACK_DVS_EVENT_GET_SLAB_FAST]              = "get_slab_fast",
+    [RACK_DVS_EVENT_GET_SLAB_SLOW]              = "get_slab_slow",
+    [RACK_DVS_EVENT_UPDATE_SLAB_POOL]           = "update_slab_pool",
     [RACK_DVS_EVENT_SLAB_READ]                  = "slab_read",
     [RACK_DVS_EVENT_SLAB_WRITE]                 = "slab_write",
 };
 
 struct rack_dvs_dev {
-    struct list_head head;
+    struct list_head lh;
     struct rack_dvs_ops *dvs_ops;
 };
 
 struct dvs_slab {
+    struct list_head lh;
     struct rack_dvs_dev *dev;
     void *private;
+};
+
+struct dvs_slab_pool {
+    struct list_head lh;
+    unsigned long size;
+    unsigned long slab_size_bytes;
+    spinlock_t lock;
 };
 
 struct dvs_slot {
@@ -59,6 +73,9 @@ struct rack_dvs_region {
     u64 nr_slots;
     struct dvs_slot *slots;
     struct rack_dvs_event_count __percpu *stat;
+
+    struct dvs_slab_pool slab_pool;
+    struct work_struct update_slab_pool_work;
 };
 
 #define rack_dvs_read(region, offset, size, dst) \
