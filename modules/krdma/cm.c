@@ -3,24 +3,27 @@
 #include <rdma/ib_verbs.h>
 #include <linux/inet.h>
 #include <linux/socket.h>
+#include <linux/stringhash.h>
+#include <linux/random.h>
+
 
 #include "cm.h"
 #include "rpc.h"
 #include <krdma.h>
 
 extern int g_debug;
+extern char g_nodename[__NEW_UTS_LEN + 1];
 
 #define DEBUG_LOG if (g_debug) pr_info
 
 /* shared ib resources */
 static struct ib_pd *global_pd;
-static struct ib_cq *global_cq;
 
 static struct rdma_cm_id *server_cm_id;
 
-/* a list for the connected nodes */
-static LIST_HEAD(conn_list);
-static DEFINE_SPINLOCK(conn_list_lock);
+/* conn hash table */
+static DEFINE_SPINLOCK(conn_ht_lock);
+static DEFINE_HASHTABLE(conn_ht, 10);
 
 /* ib_device list */
 static LIST_HEAD(ib_dev_list);
@@ -31,40 +34,277 @@ struct krdma_ib_dev {
     struct ib_device *ib_dev;
 };
 
+static int poll_cq_one(struct ib_cq *cq)
+{
+    int ret;
+    struct ib_wc wc;
+
+    while (true) {
+        ret = ib_poll_cq(cq, 1, &wc);
+        if (ret < 0 || ret > 1) {
+            pr_err("error on ib_poll_cq: (%d, %d)\n", ret, wc.status);
+            ret = -EINVAL;
+            goto out;
+        }
+        if (ret == 1)
+            break;
+    }
+
+    return 0;
+
+out:
+    return ret;
+}
+
+static int handshake_client(struct krdma_conn *conn)
+{
+    int ret;
+    const struct ib_send_wr *bad_send_wr;
+    const struct ib_recv_wr *bad_recv_wr;
+    const struct ib_send_wr *send_wr = &conn->send_msg->send_wr;
+    const struct ib_recv_wr *recv_wr = &conn->recv_msg->recv_wr;
+
+    ret = ib_post_send(conn->rdma_qp.qp, send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
+
+    /* poll send */
+    poll_cq_one(conn->rdma_qp.cq);
+
+    /* poll recv */
+    poll_cq_one(conn->rdma_qp.cq);
+
+    ret = ib_post_recv(conn->rdma_qp.qp, recv_wr, &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        goto out;
+    }
+
+    return 0;
+
+out:
+    return ret;
+}
+
+static int handshake_server(struct krdma_conn *conn)
+{
+    int ret;
+    const struct ib_send_wr *bad_send_wr;
+    const struct ib_recv_wr *bad_recv_wr;
+    const struct ib_send_wr *send_wr = &conn->send_msg->send_wr;
+    const struct ib_recv_wr *recv_wr = &conn->recv_msg->recv_wr;
+
+    /* poll recv */
+    poll_cq_one(conn->rdma_qp.cq);
+
+    ret = ib_post_recv(conn->rdma_qp.qp, recv_wr, &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        goto out;
+    }
+
+    ret = ib_post_send(conn->rdma_qp.qp, send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
+
+    /* poll send */
+    poll_cq_one(conn->rdma_qp.cq);
+
+    return 0;
+
+out:
+    return ret;
+}
+
+
 static void cleanup_connection(struct work_struct *ws)
 {
     struct krdma_conn *conn;
 
     conn = container_of(ws, struct krdma_conn, cleanup_connection_work);
 
+    ib_destroy_qp(conn->rpc_qp.qp);
+    ib_destroy_cq(conn->rpc_qp.cq);
+
+    krdma_msg_pool_destroy(conn->recv_msg_pool);
+    krdma_msg_pool_destroy(conn->send_msg_pool);
+
     rdma_destroy_qp(conn->cm_id);
+    ib_destroy_cq(conn->rdma_qp.cq);
     rdma_destroy_id(conn->cm_id);
 
-    krdma_msg_pool_destroy(conn->send_msg_pool);
-    krdma_msg_pool_destroy(conn->recv_msg_pool);
+    krdma_msg_free(conn->recv_msg);
+    krdma_msg_free(conn->send_msg);
 
-    spin_lock(&conn_list_lock);
-    list_del_init(&conn->lh);
-    spin_unlock(&conn_list_lock);
+    spin_lock(&conn_ht_lock);
+    hash_del(&conn->hn);
+    spin_unlock(&conn_ht_lock);
 
     kfree(conn);
     DEBUG_LOG("cleanup_connection\n");
 }
 
-static int addr_resolved(struct krdma_conn *conn)
+static int connect_qp(struct ib_qp *qp, struct ib_qp_attr *qp_attr,
+                      u32 local_psn, u32 remote_qpn, u32 remote_psn)
+{
+    int ret, mask;
+    struct ib_qp_attr new_qp_attr;
+
+    /* transition to INIT */
+    mask  = IB_QP_STATE;
+    mask |= IB_QP_ACCESS_FLAGS;
+    mask |= IB_QP_PKEY_INDEX;
+    mask |= IB_QP_PORT;
+
+    memset(&new_qp_attr, 0, sizeof(new_qp_attr));
+    new_qp_attr.qp_state = IB_QPS_INIT;
+    new_qp_attr.qp_access_flags = qp_attr->qp_access_flags;
+    new_qp_attr.pkey_index = qp_attr->pkey_index;
+    new_qp_attr.port_num = qp_attr->port_num;
+
+    ret = ib_modify_qp(qp, &new_qp_attr, mask);
+    if (ret) {
+        pr_err("error on ib_modify_qp: %d\n", ret);
+        goto out;
+    }
+
+    /* trasition to RTR */
+    mask  = IB_QP_STATE;
+    mask |= IB_QP_AV;
+    mask |= IB_QP_PATH_MTU;
+    mask |= IB_QP_DEST_QPN;
+    mask |= IB_QP_RQ_PSN;
+    mask |= IB_QP_MAX_DEST_RD_ATOMIC;
+    mask |= IB_QP_MIN_RNR_TIMER;
+
+    memset(&new_qp_attr, 0, sizeof(new_qp_attr));
+    new_qp_attr.qp_state = IB_QPS_RTR;
+    new_qp_attr.ah_attr = qp_attr->ah_attr;
+    new_qp_attr.path_mtu = qp_attr->path_mtu;
+    new_qp_attr.dest_qp_num = remote_qpn;
+    new_qp_attr.rq_psn = remote_psn;
+    new_qp_attr.max_dest_rd_atomic = qp_attr->max_dest_rd_atomic;
+    new_qp_attr.min_rnr_timer = qp_attr->min_rnr_timer;
+
+    ret = ib_modify_qp(qp, &new_qp_attr, mask);
+    if (ret) {
+        pr_err("error on ib_modify_qp: %d\n", ret);
+        goto out;
+    }
+
+    /* trasition to RTS */
+    mask  = IB_QP_STATE;
+    mask |= IB_QP_SQ_PSN;
+    mask |= IB_QP_RETRY_CNT;
+    mask |= IB_QP_RNR_RETRY;
+    mask |= IB_QP_MAX_QP_RD_ATOMIC;
+    mask |= IB_QP_TIMEOUT;
+
+    memset(&new_qp_attr, 0, sizeof(new_qp_attr));
+    new_qp_attr.qp_state = IB_QPS_RTS;
+    new_qp_attr.sq_psn = local_psn;
+    new_qp_attr.retry_cnt = qp_attr->retry_cnt;
+    new_qp_attr.rnr_retry = qp_attr->rnr_retry;
+    new_qp_attr.max_rd_atomic = qp_attr->max_rd_atomic;
+    new_qp_attr.timeout = qp_attr->timeout;
+
+    ret = ib_modify_qp(qp, &new_qp_attr, mask);
+    if (ret) {
+        pr_err("error on ib_modify_qp: %d\n", ret);
+        goto out;
+    }
+
+    return 0;
+
+out:
+    return ret;
+}
+
+static int allocate_rpc_qp(struct krdma_conn *conn)
 {
     int ret;
-    int timeout = 1000;
+    struct rdma_cm_id *cm_id = conn->cm_id;
+    struct ib_cq_init_attr cq_attr;
     struct ib_qp_init_attr qp_attr;
 
-    conn->pd = global_pd;
-    conn->cq = global_cq;
+    memset(&cq_attr, 0, sizeof(cq_attr));
+    cq_attr.cqe = KRDMA_MAX_CQE;
+    cq_attr.comp_vector = 0;
 
-    /* create ib_qp */
+    conn->rpc_qp.cq = ib_create_cq(cm_id->device, krdma_cq_comp_handler,
+                                   krdma_cq_event_handler, conn, &cq_attr);
+    if (IS_ERR(conn->rpc_qp.cq)) {
+        ret = PTR_ERR(conn->rpc_qp.cq);
+        pr_err("error on ib_create_cq: %d\n", ret);
+        goto out;
+    }
+
+    ret = ib_req_notify_cq(conn->rpc_qp.cq, IB_CQ_NEXT_COMP);
+    if (ret) {
+        pr_err("error on ib_req_notify_cq: %d\n", ret);
+        goto out;
+    }
+
     memset(&qp_attr, 0, sizeof(qp_attr));
     qp_attr.qp_context = (void *) conn;
-    qp_attr.send_cq = conn->cq;
-    qp_attr.recv_cq = conn->cq;
+    qp_attr.send_cq = conn->rpc_qp.cq;
+    qp_attr.recv_cq = conn->rpc_qp.cq;
+    qp_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
+    qp_attr.qp_type = IB_QPT_RC;
+    qp_attr.cap.max_send_wr = KRDMA_MAX_SEND_WR;
+    qp_attr.cap.max_recv_wr = KRDMA_MAX_RECV_WR;
+    qp_attr.cap.max_send_sge = KRDMA_MAX_SEND_SGE;
+    qp_attr.cap.max_recv_sge = KRDMA_MAX_RECV_SGE;
+
+    /* for flush_qp() ? */
+    qp_attr.cap.max_send_wr++;
+    qp_attr.cap.max_recv_wr++;
+
+    conn->rpc_qp.qp = ib_create_qp(conn->pd, &qp_attr);
+    if (IS_ERR(conn->rpc_qp.qp)) {
+        ret = PTR_ERR(conn->rpc_qp.qp);
+        pr_err("error on ib_create_qp: %d\n", ret);
+        goto out_destroy_cq;
+    }
+
+    return 0;
+
+out_destroy_cq:
+    ib_destroy_cq(conn->rpc_qp.cq);
+    conn->rpc_qp.cq = NULL;
+out:
+    return ret;
+}
+
+static int allocate_rdma_qp(struct krdma_conn *conn)
+{
+    int ret;
+    struct ib_cq_init_attr cq_attr;
+    struct ib_qp_init_attr qp_attr;
+    struct krdma_qp *kqp = &conn->rdma_qp;
+
+    /* Step 1: allocate CQ */
+    memset(&cq_attr, 0, sizeof(cq_attr));
+    cq_attr.cqe = KRDMA_MAX_CQE;
+    cq_attr.comp_vector = 0;
+
+    kqp->cq = ib_create_cq(
+            conn->cm_id->device, NULL, NULL, conn, &cq_attr);
+    if (IS_ERR(kqp->cq)) {
+        ret = PTR_ERR(kqp->cq);
+        pr_err("error on ib_create_cq: %d\n", ret);
+        goto out;
+    }
+
+    /* Step 2: allocate QP */
+    memset(&qp_attr, 0, sizeof(qp_attr));
+    qp_attr.qp_context = (void *) conn;
+    qp_attr.send_cq = kqp->cq;
+    qp_attr.recv_cq = kqp->cq;
     qp_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
     qp_attr.qp_type = IB_QPT_RC;
     qp_attr.cap.max_send_wr = KRDMA_MAX_SEND_WR;
@@ -81,7 +321,26 @@ static int addr_resolved(struct krdma_conn *conn)
         pr_err("error on rdma_create_qp: %d\n", ret);
         goto out;
     }
-    conn->qp = conn->cm_id->qp;
+    kqp->qp = conn->cm_id->qp;
+
+    return 0;
+
+out:
+    return ret;
+}
+
+static int addr_resolved(struct krdma_conn *conn)
+{
+    int ret;
+    int timeout = 1000;
+
+    conn->pd = global_pd;
+
+    ret = allocate_rdma_qp(conn);
+    if (ret) {
+        pr_err("error on alocate_rdma_qp: %d\n", ret);
+        goto out;
+    }
 
     ret = rdma_resolve_route(conn->cm_id, timeout);
     if (ret) {
@@ -100,36 +359,29 @@ out:
 static int route_resolved(struct krdma_conn *conn)
 {
     int ret;
-    struct krdma_msg *msg;
     const struct ib_recv_wr *bad_recv_wr;
     struct rdma_conn_param conn_param;
 
-    /* allocate message pool */
-    conn->send_msg_pool = krdma_msg_pool_create(
-            conn, KRDMA_SEND_MSG_POOL_SIZE, KRDMA_SEND_MSG_SIZE);
-    if (conn->send_msg_pool == NULL) {
-        pr_err("failed to allocate send message pool\n");
+    conn->send_msg = krdma_msg_alloc(conn, 4096);
+    if (conn->send_msg == NULL) {
+        pr_err("error on krdma_msg_alloc\n");
         ret = -ENOMEM;
         goto out;
     }
 
-    conn->recv_msg_pool = krdma_msg_pool_create(
-            conn, KRDMA_RECV_MSG_POOL_SIZE, KRDMA_RECV_MSG_SIZE);
-    if (conn->recv_msg_pool == NULL) {
-        pr_err("failed to allocate recv message pool\n");
+    conn->recv_msg = krdma_msg_alloc(conn, 4096);
+    if (conn->send_msg == NULL) {
+        pr_err("error on krdma_msg_alloc\n");
         ret = -ENOMEM;
-        goto out_destroy_send_msg_pool;
+        goto out_free_send_msg;
     }
 
-    spin_lock(&conn->recv_msg_pool->lock);
-    list_for_each_entry(msg, &conn->recv_msg_pool->lh, lh) {
-        ret = ib_post_recv(conn->qp, &msg->recv_wr, &bad_recv_wr);
-        if (ret) {
-            pr_err("error on ib_post_recv: %d\n", ret);
-            goto out_destroy_recv_msg_pool;
-        }
+    ret = ib_post_recv(conn->rdma_qp.qp, &conn->recv_msg->recv_wr,
+                       &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        goto out_free_recv_msg;
     }
-    spin_unlock(&conn->recv_msg_pool->lock);
 
     memset(&conn_param, 0, sizeof(conn_param));
     conn_param.responder_resources = 1;
@@ -145,23 +397,127 @@ static int route_resolved(struct krdma_conn *conn)
 
     return 0;
 
-out_destroy_recv_msg_pool:
-    krdma_msg_pool_destroy(conn->recv_msg_pool);
-out_destroy_send_msg_pool:
-    krdma_msg_pool_destroy(conn->send_msg_pool);
+out_free_recv_msg:
+    krdma_msg_free(conn->recv_msg);
+out_free_send_msg:
+    krdma_msg_free(conn->send_msg);
 out:
     return ret;
 }
 
 static int established_client(struct krdma_conn *conn)
 {
+    int ret;
+    struct krdma_msg *msg;
+    const struct ib_recv_wr *bad_recv_wr;
+    struct ib_qp_attr qp_attr;
+    struct ib_qp_init_attr qp_init_attr;
+    u32 local_qpn, local_psn, remote_qpn, remote_psn;
+
     DEBUG_LOG("established client: %p\n", conn->cm_id->device);
 
-    spin_lock(&conn_list_lock);
-    list_add_tail(&conn->lh, &conn_list);
-    spin_unlock(&conn_list_lock);
+    /* Step 1: exchange the node name */
+    strcpy((char *) conn->send_msg->buf, g_nodename);
+
+    ret = handshake_client(conn);
+    if (ret) {
+        pr_err("error on handshake_client\n");
+        goto out;
+    }
+
+    strcpy(conn->nodename, (char *) conn->recv_msg->buf);
+    conn->nodehash = hashlen_hash(hashlen_string(NULL, conn->nodename));
+    DEBUG_LOG("established client: handshake nodename: %s, nodehash: %u\n",
+              conn->nodename, conn->nodehash);
+
+    /* Step 2: allocate rpc_qp */
+    ret = allocate_rpc_qp(conn);
+    if (ret) {
+        pr_err("error on allocate_rpc_qp: %d\n", ret);
+        goto out;
+    }
+
+    /* Step 3: allocate a RPC message pool */
+    conn->send_msg_pool = krdma_msg_pool_create(
+            conn, KRDMA_SEND_MSG_POOL_SIZE, KRDMA_SEND_MSG_SIZE);
+    if (conn->send_msg_pool == NULL) {
+        pr_err("failed to allocate send message pool\n");
+        ret = -ENOMEM;
+        goto out_destroy_rpc_qp;
+    }
+
+    conn->recv_msg_pool = krdma_msg_pool_create(
+            conn, KRDMA_RECV_MSG_POOL_SIZE, KRDMA_RECV_MSG_SIZE);
+    if (conn->recv_msg_pool == NULL) {
+        pr_err("failed to allocate recv message pool\n");
+        ret = -ENOMEM;
+        goto out_destroy_send_msg_pool;
+    }
+
+    /* Step 4: post the RPC message pool */
+    spin_lock(&conn->recv_msg_pool->lock);
+    list_for_each_entry(msg, &conn->recv_msg_pool->lh, lh) {
+        ret = ib_post_recv(conn->rpc_qp.qp, &msg->recv_wr, &bad_recv_wr);
+        if (ret) {
+            pr_err("error on ib_post_recv: %d\n", ret);
+            goto out_destroy_recv_msg_pool;
+        }
+    }
+    spin_unlock(&conn->recv_msg_pool->lock);
+
+    /* Step 5: exchange the QP data */
+    local_qpn = conn->rpc_qp.qp->qp_num;
+    local_psn = get_random_int() & 0xFFFFFF;
+
+    ((u32 *) conn->send_msg->buf)[0] = local_qpn;
+    ((u32 *) conn->send_msg->buf)[1] = local_psn;
+
+    ret = handshake_client(conn);
+    if (ret) {
+        pr_err("error on handshake_client\n");
+        goto out;
+    }
+
+    remote_qpn = ((u32 *) conn->recv_msg->buf)[0];
+    remote_psn = ((u32 *) conn->recv_msg->buf)[1];
+
+    DEBUG_LOG("established_client: handshake QP data: (%u, %u)\n",
+              remote_qpn, remote_psn);
+
+    /* Step 6: connect the QP, reuse the rdma_qp data */
+    memset(&qp_attr, 0, sizeof(qp_attr));
+    memset(&qp_init_attr, 0, sizeof(qp_init_attr));
+    ret = ib_query_qp(conn->rdma_qp.qp, &qp_attr, 0, &qp_init_attr);
+    if (ret) {
+        pr_err("error on ib_query_qp: %d\n", ret);
+        goto out;
+    }
+
+    ret = connect_qp(conn->rpc_qp.qp, &qp_attr, local_psn, remote_qpn,
+                     remote_psn);
+    if (ret) {
+        pr_err("failed to connect the rpc_qp\n");
+        goto out_destroy_recv_msg_pool;
+    }
+
+    /* Step 7: add the connection to the hash table */
+    spin_lock(&conn_ht_lock);
+    hash_add(conn_ht, &conn->hn, conn->nodehash);
+    spin_unlock(&conn_ht_lock);
 
     return 0;
+
+out_destroy_recv_msg_pool:
+    krdma_msg_pool_destroy(conn->recv_msg_pool);
+    conn->recv_msg_pool = NULL;
+out_destroy_send_msg_pool:
+    krdma_msg_pool_destroy(conn->send_msg_pool);
+    conn->send_msg_pool = NULL;
+out_destroy_rpc_qp:
+    ib_destroy_qp(conn->rpc_qp.qp);
+    conn->rpc_qp.qp = NULL;
+out:
+    return ret;
 }
 
 static int krdma_cm_event_handler_client(struct rdma_cm_id *cm_id,
@@ -222,10 +578,8 @@ static int connect_request(struct rdma_cm_id *cm_id)
 {
     int ret;
     struct krdma_conn *conn;
-    struct krdma_msg *msg;
-    struct ib_qp_init_attr qp_attr;
-    const struct ib_recv_wr *bad_recv_wr;
     struct rdma_conn_param conn_param;
+    const struct ib_recv_wr *bad_recv_wr;
 
     conn = kzalloc(sizeof(*conn), GFP_KERNEL);
     if (conn == NULL) {
@@ -236,61 +590,37 @@ static int connect_request(struct rdma_cm_id *cm_id)
 
     conn->cm_id = cm_id;
     conn->pd = global_pd;
-    conn->cq = global_cq;
 
-    INIT_LIST_HEAD(&conn->lh);
     init_completion(&conn->cm_done);
     INIT_WORK(&conn->cleanup_connection_work, cleanup_connection);
 
-    /* create ib_qp */
-    memset(&qp_attr, 0, sizeof(qp_attr));
-    qp_attr.qp_context = (void *) conn;
-    qp_attr.send_cq = conn->cq;
-    qp_attr.recv_cq = conn->cq;
-    qp_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
-    qp_attr.qp_type = IB_QPT_RC;
-    qp_attr.cap.max_send_wr = KRDMA_MAX_SEND_WR;
-    qp_attr.cap.max_recv_wr = KRDMA_MAX_RECV_WR;
-    qp_attr.cap.max_send_sge = KRDMA_MAX_SEND_SGE;
-    qp_attr.cap.max_recv_sge = KRDMA_MAX_RECV_SGE;
-
-    /* for flush_qp() */
-    qp_attr.cap.max_send_wr++;
-    qp_attr.cap.max_recv_wr++;
-
-    ret = rdma_create_qp(conn->cm_id, conn->pd, &qp_attr);
+    ret = allocate_rdma_qp(conn);
     if (ret) {
-        pr_err("error on rdma_create_qp: %d\n", ret);
+        pr_err("error on alocate_rdma_qp: %d\n", ret);
         goto out_kfree_conn;
     }
-    conn->qp = conn->cm_id->qp;
 
-    /* allocate message pool */
-    conn->send_msg_pool = krdma_msg_pool_create(
-            conn, KRDMA_SEND_MSG_POOL_SIZE, KRDMA_SEND_MSG_SIZE);
-    if (conn->send_msg_pool == NULL) {
-        pr_err("failed to allocate send message pool\n");
+    /* allocate send message */
+    conn->send_msg = krdma_msg_alloc(conn, 4096);
+    if (conn->send_msg == NULL) {
+        pr_err("error on krdma_msg_alloc\n");
         ret = -ENOMEM;
         goto out_destroy_qp;
     }
-
-    conn->recv_msg_pool = krdma_msg_pool_create(
-            conn, KRDMA_RECV_MSG_POOL_SIZE, KRDMA_RECV_MSG_SIZE);
-    if (conn->recv_msg_pool == NULL) {
-        pr_err("failed to allocate recv message pool\n");
+    /* allocate recv message */
+    conn->recv_msg = krdma_msg_alloc(conn, 4096);
+    if (conn->send_msg == NULL) {
+        pr_err("error on krdma_msg_alloc\n");
         ret = -ENOMEM;
-        goto out_destroy_send_msg_pool;
+        goto out_free_send_msg;
     }
 
-    spin_lock(&conn->recv_msg_pool->lock);
-    list_for_each_entry(msg, &conn->recv_msg_pool->lh, lh) {
-        ret = ib_post_recv(conn->qp, &msg->recv_wr, &bad_recv_wr);
-        if (ret) {
-            pr_err("error on ib_post_recv: %d\n", ret);
-            goto out_destroy_recv_msg_pool;
-        }
+    ret = ib_post_recv(conn->rdma_qp.qp, &conn->recv_msg->recv_wr,
+                       &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        goto out_free_recv_msg;
     }
-    spin_unlock(&conn->recv_msg_pool->lock);
 
     memset(&conn_param, 0, sizeof(conn_param));
     conn_param.responder_resources = 1;
@@ -299,15 +629,15 @@ static int connect_request(struct rdma_cm_id *cm_id)
     ret = rdma_accept(cm_id, &conn_param);
     if (ret) {
         pr_err("error on rdma_accept: %d\n", ret);
-        goto out_destroy_recv_msg_pool;
+        goto out_free_recv_msg;
     }
 
     return 0;
 
-out_destroy_recv_msg_pool:
-    krdma_msg_pool_destroy(conn->recv_msg_pool);
-out_destroy_send_msg_pool:
-    krdma_msg_pool_destroy(conn->send_msg_pool);
+out_free_recv_msg:
+    krdma_msg_free(conn->recv_msg);
+out_free_send_msg:
+    krdma_msg_free(conn->send_msg);
 out_destroy_qp:
     rdma_destroy_qp(conn->cm_id);
 out_kfree_conn:
@@ -318,13 +648,117 @@ out:
 
 static int established_server(struct krdma_conn *conn)
 {
+    int ret;
+    struct krdma_msg *msg;
+    const struct ib_recv_wr *bad_recv_wr;
+    struct ib_qp_attr qp_attr;
+    struct ib_qp_init_attr qp_init_attr;
+    u32 local_qpn, local_psn, remote_qpn, remote_psn;
+
     DEBUG_LOG("established server: %p\n", conn->cm_id->device);
 
-    spin_lock(&conn_list_lock);
-    list_add_tail(&conn->lh, &conn_list);
-    spin_unlock(&conn_list_lock);
+    /* Step 1: exchange the node name */
+    strcpy((char *) conn->send_msg->buf, g_nodename);
+
+    ret = handshake_server(conn);
+    if (ret) {
+        pr_err("error on handshake_server\n");
+        goto out;
+    }
+
+    strcpy(conn->nodename, (char *) conn->recv_msg->buf);
+    conn->nodehash = hashlen_hash(hashlen_string(NULL, conn->nodename));
+    DEBUG_LOG("established server: handshake nodename: %s, nodehash: %u\n",
+              conn->nodename, conn->nodehash);
+
+    /* Step 2: allocate rpc_qp */
+    ret = allocate_rpc_qp(conn);
+    if (ret) {
+        pr_err("error on allocate_rpc_qp: %d\n", ret);
+        goto out;
+    }
+
+    /* Step 3: allocate a RPC message pool */
+    conn->send_msg_pool = krdma_msg_pool_create(
+            conn, KRDMA_SEND_MSG_POOL_SIZE, KRDMA_SEND_MSG_SIZE);
+    if (conn->send_msg_pool == NULL) {
+        pr_err("failed to allocate send message pool\n");
+        ret = -ENOMEM;
+        goto out_destroy_rpc_qp;
+    }
+
+    conn->recv_msg_pool = krdma_msg_pool_create(
+            conn, KRDMA_RECV_MSG_POOL_SIZE, KRDMA_RECV_MSG_SIZE);
+    if (conn->recv_msg_pool == NULL) {
+        pr_err("failed to allocate recv message pool\n");
+        ret = -ENOMEM;
+        goto out_destroy_send_msg_pool;
+    }
+
+    /* Step 4: post the RPC message pool */
+    spin_lock(&conn->recv_msg_pool->lock);
+    list_for_each_entry(msg, &conn->recv_msg_pool->lh, lh) {
+        ret = ib_post_recv(conn->rpc_qp.qp, &msg->recv_wr, &bad_recv_wr);
+        if (ret) {
+            pr_err("error on ib_post_recv: %d\n", ret);
+            goto out_destroy_recv_msg_pool;
+        }
+    }
+    spin_unlock(&conn->recv_msg_pool->lock);
+
+    /* Step 5: exchange the QP data */
+    local_qpn = conn->rpc_qp.qp->qp_num;
+    local_psn = get_random_int() & 0xFFFFFF;
+
+    ((u32 *) conn->send_msg->buf)[0] = local_qpn;
+    ((u32 *) conn->send_msg->buf)[1] = local_psn;
+
+    ret = handshake_server(conn);
+    if (ret) {
+        pr_err("error on handshake_server\n");
+        goto out;
+    }
+
+    remote_qpn = ((u32 *) conn->recv_msg->buf)[0];
+    remote_psn = ((u32 *) conn->recv_msg->buf)[1];
+
+    DEBUG_LOG("established_server: handshake QP data: (%u, %u)\n",
+              remote_qpn, remote_psn);
+
+    /* Step 6: connect the QP, reuse the rdma_qp data */
+    memset(&qp_attr, 0, sizeof(qp_attr));
+    memset(&qp_init_attr, 0, sizeof(qp_init_attr));
+    ret = ib_query_qp(conn->rdma_qp.qp, &qp_attr, 0, &qp_init_attr);
+    if (ret) {
+        pr_err("error on ib_query_qp: %d\n", ret);
+        goto out;
+    }
+
+    ret = connect_qp(conn->rpc_qp.qp, &qp_attr, local_psn, remote_qpn,
+                     remote_psn);
+    if (ret) {
+        pr_err("failed to connect the rpc_qp\n");
+        goto out_destroy_recv_msg_pool;
+    }
+
+    /* Step 7: add the connection to the hash table */
+    spin_lock(&conn_ht_lock);
+    hash_add(conn_ht, &conn->hn, conn->nodehash);
+    spin_unlock(&conn_ht_lock);
 
     return 0;
+
+out_destroy_recv_msg_pool:
+    krdma_msg_pool_destroy(conn->recv_msg_pool);
+    conn->recv_msg_pool = NULL;
+out_destroy_send_msg_pool:
+    krdma_msg_pool_destroy(conn->send_msg_pool);
+    conn->send_msg_pool = NULL;
+out_destroy_rpc_qp:
+    ib_destroy_qp(conn->rpc_qp.qp);
+    conn->rpc_qp.qp = NULL;
+out:
+    return ret;
 }
 
 static int krdma_cm_event_handler_server(struct rdma_cm_id *cm_id,
@@ -451,27 +885,13 @@ static struct ib_client krdma_ib_client = {
 };
 
 
-static void cq_comp_handler(struct ib_cq *cq, void *ctx)
-{
-    DEBUG_LOG("cq_comp_handler: (%p, %p)\n", cq, ctx);
-    /* TODO: add implementation */
-}
-
-static void cq_event_handler(struct ib_event *event, void *ctx)
-{
-    DEBUG_LOG("cq_event_handler: (%s, %p)\n", ib_event_msg(event->event), ctx);
-    /* TODO: add implementation */
-}
-
 int krdma_setup(char *server, int port)
 {
     int ret;
     int backlog = 128;
     struct sockaddr_storage sin;
     struct krdma_ib_dev *dev;
-    struct ib_cq_init_attr cq_attr;
 
-    /* Step 1: register a ib_client */
     ret = ib_register_client(&krdma_ib_client);
     if (ret) {
         pr_err("failed to register a ib_client\n");
@@ -484,7 +904,6 @@ int krdma_setup(char *server, int port)
         goto out_unregister_ib_client;
     }
 
-    /* Step 2: allocate global ib_pd */
     global_pd = ib_alloc_pd(dev->ib_dev, IB_PD_UNSAFE_GLOBAL_RKEY);
     if (IS_ERR(global_pd)) {
         ret = PTR_ERR(global_pd);
@@ -492,33 +911,12 @@ int krdma_setup(char *server, int port)
         goto out_unregister_ib_client;
     }
 
-    memset(&cq_attr, 0, sizeof(cq_attr));
-    cq_attr.cqe = KRDMA_MAX_CQE;
-    cq_attr.comp_vector = 0;
-
-    /* Step 3: allocate global ib_cq */
-    global_cq = ib_create_cq(dev->ib_dev, cq_comp_handler, cq_event_handler,
-                             NULL, &cq_attr);
-    if (IS_ERR(global_cq)) {
-        ret = PTR_ERR(global_cq);
-        pr_err("failed to create global cq: %d\n", ret);
-        goto out_dealloc_pd;
-    }
-
-    /* Step 4: setup RPC processing threads */
-    ret = krdma_rpc_setup(dev->ib_dev, global_pd, global_cq);
-    if (ret) {
-        pr_err("failed to setup krdma RPC\n");
-        goto out_destroy_cq;
-    }
-
-    /* Step 5: create a rdma_cm_id for the server */
     server_cm_id = rdma_create_id(&init_net, krdma_cm_event_handler_server,
                                   NULL, RDMA_PS_TCP, IB_QPT_RC);
     if (IS_ERR(server_cm_id)) {
         ret = PTR_ERR(server_cm_id);
         pr_err("error on rdma_create_id: %d\n", ret);
-        goto out_rpc_cleanup;
+        goto out_dealloc_pd;
     }
 
     ret = fill_sockaddr(&sin, AF_INET, server, port);
@@ -545,11 +943,6 @@ int krdma_setup(char *server, int port)
 
 out_destroy_cm_id:
     rdma_destroy_id(server_cm_id);
-out_rpc_cleanup:
-    krdma_rpc_cleanup();
-out_destroy_cq:
-    ib_destroy_cq(global_cq);
-    global_cq = NULL;
 out_dealloc_pd:
     ib_dealloc_pd(global_pd);
     global_pd = NULL;
@@ -561,38 +954,36 @@ out:
 
 static int live_connections(void)
 {
-    int n = 0;
+    int i = 0, n = 0;
     struct krdma_conn *conn;
 
-    spin_lock(&conn_list_lock);
-    list_for_each_entry(conn, &conn_list, lh)
+    spin_lock(&conn_ht_lock);
+    hash_for_each(conn_ht, i, conn, hn)
         n++;
-    spin_unlock(&conn_list_lock);
+    spin_unlock(&conn_ht_lock);
 
     return n;
 }
 
 void krdma_cleanup(void)
 {
+    int i = 0;
     struct krdma_conn *conn;
 
-    spin_lock(&conn_list_lock);
-    list_for_each_entry(conn, &conn_list, lh)
+    spin_lock(&conn_ht_lock);
+    hash_for_each(conn_ht, i, conn, hn)
         rdma_disconnect(conn->cm_id);
-    spin_unlock(&conn_list_lock);
+    spin_unlock(&conn_ht_lock);
 
     /* wait until all connections are cleaned up */
     while (live_connections() > 0)
         udelay(1000);
 
     rdma_destroy_id(server_cm_id);
-    krdma_rpc_cleanup();
-    ib_destroy_cq(global_cq);
     ib_dealloc_pd(global_pd);
     ib_unregister_client(&krdma_ib_client);
 
     server_cm_id = NULL;
-    global_cq = NULL;
     global_pd = NULL;
 
     DEBUG_LOG("krdma_cleanup, server_cm_id: %p\n", server_cm_id);
@@ -612,7 +1003,6 @@ int krdma_connect(char *server, int port)
         goto out;
     }
 
-    INIT_LIST_HEAD(&conn->lh);
     init_completion(&conn->cm_done);
     INIT_WORK(&conn->cleanup_connection_work, cleanup_connection);
 

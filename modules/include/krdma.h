@@ -2,6 +2,7 @@
 #define _INCLUDE_KRDMA_H_
 
 #include <rdma/rdma_cm.h>
+#include <linux/utsname.h>
 
 #define KRDMA_MAX_SEND_WR       128UL
 #define KRDMA_MAX_RECV_WR       128UL
@@ -36,18 +37,29 @@ struct krdma_msg_pool {
     spinlock_t lock;
 };
 
+struct krdma_qp {
+    struct ib_qp *qp;
+    struct ib_cq *cq;
+};
+
 struct krdma_conn {
+    struct hlist_node hn;
+    char nodename[__NEW_UTS_LEN + 1];
+    u32 nodehash;
+
     struct rdma_cm_id *cm_id;
     struct ib_pd *pd;
-    struct ib_cq *cq;
-    struct ib_qp *qp;
 
-    struct list_head lh;
     int cm_error;
     struct completion cm_done;
     struct work_struct cleanup_connection_work;
 
-    /* RPC related */
+    struct krdma_msg *send_msg;
+    struct krdma_msg *recv_msg;
+
+    struct krdma_qp rdma_qp;
+    struct krdma_qp rpc_qp;
+
     struct krdma_msg_pool *send_msg_pool;
     struct krdma_msg_pool *recv_msg_pool;
 };
