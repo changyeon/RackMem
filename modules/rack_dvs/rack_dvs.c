@@ -25,7 +25,7 @@ void update_slab_pool(struct work_struct *ws)
     struct dvs_slab_pool *slab_pool;
     struct rack_dvs_dev *dev;
     struct dvs_slab *slab;
-    unsigned long i, n = 8192UL;
+    unsigned long i;
 
     region = container_of(ws, struct rack_dvs_region, update_slab_pool_work);
     slab_pool = &region->slab_pool;
@@ -40,7 +40,7 @@ void update_slab_pool(struct work_struct *ws)
     spin_unlock(&dvs_dev_list_lock);
 
     spin_lock(&slab_pool->lock);
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < (region->nr_slots / 20); i++) {
         slab = dev->dvs_ops->alloc(slab_pool->slab_size_bytes);
         if (slab == NULL) {
             pr_err("failed to allocate a slab from dev: %p\n", dev);
@@ -104,12 +104,10 @@ out:
 
 static void check_and_update_slab_pool(struct rack_dvs_region *region)
 {
-    /*
-     *spin_lock(&region->slab_pool.lock);
-     *if (region->slab_pool.size < 4096)
-     *    schedule_work(&region->update_slab_pool_work);
-     *spin_unlock(&region->slab_pool.lock);
-     */
+    spin_lock(&region->slab_pool.lock);
+    if (region->slab_pool.size < (region->nr_slots / 40))
+        schedule_work(&region->update_slab_pool_work);
+    spin_unlock(&region->slab_pool.lock);
 }
 
 /**
