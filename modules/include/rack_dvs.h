@@ -86,7 +86,7 @@ struct rack_dvs_region {
 /*
  * Test functions
  */
-int dvs_test_single_thread_correctness(void);
+int dvs_test_single_thread_correctness(u64 size_mb, u64 slab_mb);
 
 /*
  * Exported APIs

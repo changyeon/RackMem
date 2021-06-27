@@ -26,7 +26,7 @@ struct rdma_slab {
 static LIST_HEAD(rdma_node_list);
 static DEFINE_SPINLOCK(rdma_node_list_lock);
 
-static int rdma_alloc(struct dvs_slab *slab, u64 size);
+static struct dvs_slab *rdma_alloc(u64 size);
 static void rdma_free(struct dvs_slab *slab);
 static int rdma_read(struct dvs_slab *slab, u64 offset, u64 size, void *dst);
 static int rdma_write(struct dvs_slab *slab, u64 offset, u64 size, void *src);
@@ -62,11 +62,14 @@ out:
     return NULL;
 }
 
-static int rdma_alloc(struct dvs_slab *slab, u64 size)
+static struct dvs_slab *rdma_alloc(u64 size)
 {
     int ret = 0;
+    struct dvs_slab *dvs_slab;
     struct rdma_node *node;
     struct rdma_slab *rdma_slab;
+
+    DEBUG_LOG("rdma_alloc size: %llu\n", size);
 
     node = rdma_get_node();
     if (node == NULL) {
@@ -75,33 +78,45 @@ static int rdma_alloc(struct dvs_slab *slab, u64 size)
         goto out;
     }
 
-    rdma_slab = kzalloc(sizeof(*slab), GFP_KERNEL);
+    dvs_slab = kzalloc(sizeof(*dvs_slab), GFP_KERNEL);
+    if (dvs_slab == NULL) {
+        pr_err("failed to allocate memory for dvs_slab\n");
+        goto out;
+    }
+
+    rdma_slab = kzalloc(sizeof(*rdma_slab), GFP_KERNEL);
     if (rdma_slab == NULL) {
        pr_err("failed to allocate memory for rdma_slab\n");
        ret = -ENOMEM;
-       goto out;
+       goto out_kfree_dvs_slab;
     }
 
     rdma_slab->kmr = krdma_alloc_remote_memory(node->conn, size);
     if (rdma_slab->kmr == NULL) {
         pr_err("error on krdma_alloc_remote_memory\n");
         ret = -ENOMEM;
-        goto out_kfree_slab;
+        goto out_kfree_rdma_slab;
     }
 
-    slab->private = (void *) rdma_slab;
+    INIT_LIST_HEAD(&dvs_slab->lh);
+    dvs_slab->dev = &rdma_dev;
+    dvs_slab->private = (void *) rdma_slab;
 
-    return 0;
+    return dvs_slab;
 
-out_kfree_slab:
+out_kfree_rdma_slab:
     kfree(rdma_slab);
+out_kfree_dvs_slab:
+    kfree(dvs_slab);
 out:
-    return ret;
+    return NULL;
 }
 
 static void rdma_free(struct dvs_slab *slab)
 {
     struct rdma_slab *rdma_slab;
+
+    DEBUG_LOG("rdma_free slab: %p\n", slab);
 
     rdma_slab = (struct rdma_slab *) slab->private;
     krdma_free_remote_memory(rdma_slab->kmr->conn, rdma_slab->kmr);
@@ -115,6 +130,9 @@ static int rdma_read(struct dvs_slab *slab, u64 offset, u64 size, void *dst)
     struct krdma_conn *conn;
     struct krdma_mr *kmr;
     dma_addr_t addr;
+
+    DEBUG_LOG("rdma_read slab: %p, offset: %llu, size: %llu, dst: %p\n",
+              slab, offset, size, dst);
 
     rdma_slab = (struct rdma_slab *) slab->private;
     conn = rdma_slab->kmr->conn;
@@ -144,6 +162,9 @@ static int rdma_write(struct dvs_slab *slab, u64 offset, u64 size, void *src)
     struct krdma_conn *conn;
     struct krdma_mr *kmr;
     dma_addr_t addr;
+
+    DEBUG_LOG("rdma_write slab: %p, offset: %llu, size: %llu, dst: %p\n",
+              slab, offset, size, src);
 
     rdma_slab = (struct rdma_slab *) slab->private;
     conn = rdma_slab->kmr->conn;
@@ -205,11 +226,23 @@ static int __init rack_dvs_rdma_init(void)
         goto out_free_nodes;
     }
 
-    ret = dvs_test_single_thread_correctness();
+    ret = dvs_test_single_thread_correctness(64, 1);
     if (ret)
-        pr_info("dvs_test_single_thread_correctness: FAIL\n");
+        pr_info("dvs_test_single_thread_correctness (64, 1): FAIL\n");
     else
-        pr_info("dvs_test_single_thread_correctness: SUCCESS\n");
+        pr_info("dvs_test_single_thread_correctness (64, 1): SUCCESS\n");
+
+    ret = dvs_test_single_thread_correctness(1024, 64);
+    if (ret)
+        pr_info("dvs_test_single_thread_correctness (1024, 64): FAIL\n");
+    else
+        pr_info("dvs_test_single_thread_correctness (1024, 64): SUCCESS\n");
+
+    ret = dvs_test_single_thread_correctness(8192, 64);
+    if (ret)
+        pr_info("dvs_test_single_thread_correctness (8192, 64): FAIL\n");
+    else
+        pr_info("dvs_test_single_thread_correctness (8192, 64): SUCCESS\n");
 
     pr_info("rack_dvs_rdma: module loaded\n");
 

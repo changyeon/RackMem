@@ -104,10 +104,12 @@ out:
 
 static void check_and_update_slab_pool(struct rack_dvs_region *region)
 {
-    spin_lock(&region->slab_pool.lock);
-    if (region->slab_pool.size < 4096)
-        schedule_work(&region->update_slab_pool_work);
-    spin_unlock(&region->slab_pool.lock);
+    /*
+     *spin_lock(&region->slab_pool.lock);
+     *if (region->slab_pool.size < 4096)
+     *    schedule_work(&region->update_slab_pool_work);
+     *spin_unlock(&region->slab_pool.lock);
+     */
 }
 
 /**

@@ -14,4 +14,3 @@ int krdma_rpc_setup(void);
 void krdma_rpc_cleanup(void);
 
 #endif /* _KRDMA_RPC_H_ */
-

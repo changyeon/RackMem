@@ -51,18 +51,19 @@ static void test_rpc(struct krdma_conn *conn)
 
     /* Step 2: fill the message with the RPC request data */
     send_rpc = (struct krdma_rpc *) send_msg->buf;
-    send_rpc->id = KRDMA_RPC_ID_DUMMY;
+    send_rpc->rpc_id = KRDMA_RPC_ID_DUMMY;
     send_rpc->type = KRDMA_RPC_REQUEST;
     send_rpc->send_completion = 0;
     send_rpc->recv_completion = 0;
+    send_rpc->ret_code = 0;
     send_rpc->send_ptr = (u64) send_msg;
     send_rpc->recv_ptr = 0;
 
-    ((unsigned long *) &send_rpc->payload)[0] = 1;
-    ((unsigned long *) &send_rpc->payload)[1] = 2;
-    ((unsigned long *) &send_rpc->payload)[2] = 3;
-    ((unsigned long *) &send_rpc->payload)[3] = 4;
-    ((unsigned long *) &send_rpc->payload)[4] = 5;
+    ((u64 *) &send_rpc->payload)[0] = 1;
+    ((u64 *) &send_rpc->payload)[1] = 2;
+    ((u64 *) &send_rpc->payload)[2] = 3;
+    ((u64 *) &send_rpc->payload)[3] = 4;
+    ((u64 *) &send_rpc->payload)[4] = 5;
 
     /* Step 3: post send */
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
@@ -83,13 +84,14 @@ static void test_rpc(struct krdma_conn *conn)
     recv_msg = (struct krdma_msg *) send_rpc->recv_ptr;
     recv_rpc = (struct krdma_rpc *) recv_msg->buf;
 
-    pr_info("received id: %u\n", recv_rpc->id);
+    pr_info("received ret_code: %d\n", recv_rpc->ret_code);
+    pr_info("received rpc_id: %u\n", recv_rpc->rpc_id);
     pr_info("received send_ptr: %llu\n", (u64) recv_rpc->send_ptr);
-    pr_info("received result[0]: %lu\n", ((unsigned long *) &recv_rpc->payload)[0]);
-    pr_info("received result[1]: %lu\n", ((unsigned long *) &recv_rpc->payload)[1]);
-    pr_info("received result[2]: %lu\n", ((unsigned long *) &recv_rpc->payload)[2]);
-    pr_info("received result[3]: %lu\n", ((unsigned long *) &recv_rpc->payload)[3]);
-    pr_info("received result[4]: %lu\n", ((unsigned long *) &recv_rpc->payload)[4]);
+    pr_info("received result[0]: %llu\n", ((u64 *) &recv_rpc->payload)[0]);
+    pr_info("received result[1]: %llu\n", ((u64 *) &recv_rpc->payload)[1]);
+    pr_info("received result[2]: %llu\n", ((u64 *) &recv_rpc->payload)[2]);
+    pr_info("received result[3]: %llu\n", ((u64 *) &recv_rpc->payload)[3]);
+    pr_info("received result[4]: %llu\n", ((u64 *) &recv_rpc->payload)[4]);
 
     /* Step 7: post the recv message */
     ret = ib_post_recv(conn->rdma_qp.qp, &recv_msg->recv_wr, &bad_recv_wr);
@@ -510,22 +512,7 @@ static int established(struct krdma_conn *conn, bool server)
         goto out;
     }
 
-    /* TODO: remove it later */
-    /* Step 8: RPC test. */
-    {
-        int ii, nn = 10;
-        ktime_t t1, t2;
-        s64 elapsed_time;
-        for (ii = 0; ii < nn; ii++) {
-            t1 = ktime_get();
-            test_rpc(conn);
-            t2 = ktime_get();
-            elapsed_time = ktime_to_ns(ktime_sub(t2, t1));
-            pr_info("rpc response: %lld\n", elapsed_time);
-        }
-    }
-
-    /* Step 9: add the connection to the hash table */
+    /* Step 8: add the connection to the hash table */
     spin_lock(&conn_ht_lock);
     hash_add(conn_ht, &conn->hn, conn->nodehash);
     spin_unlock(&conn_ht_lock);
@@ -988,7 +975,7 @@ void krdma_cleanup(void)
 int krdma_connect(char *server, int port)
 {
     int ret;
-    int timeout = 100;
+    int timeout = 1000;
     struct krdma_conn *conn;
     struct sockaddr_storage dst_addr;
 
@@ -1046,3 +1033,21 @@ out_free_conn:
 out:
     return ret;
 }
+
+int krdma_get_all_nodes(struct krdma_conn *nodes[], int n)
+{
+    int i = 0, size = 0;
+    struct krdma_conn *curr;
+
+    spin_lock(&conn_ht_lock);
+    hash_for_each(conn_ht, i, curr, hn) {
+        if (size >= n)
+            break;
+        nodes[size++] = curr;
+    }
+    spin_unlock(&conn_ht_lock);
+
+    return size;
+}
+EXPORT_SYMBOL(krdma_get_all_nodes);
+

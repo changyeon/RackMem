@@ -35,8 +35,13 @@ static const char * const wc_opcodes[] = {
     [IB_WC_RECV_RDMA_WITH_IMM]      = "RECV_RDMA_WITH_IMM",
 };
 
+/*
+* RPC related
+*/
 enum krdma_rpc_id {
-    KRDMA_RPC_ID_DUMMY              = 0xAAAA0000,
+    KRDMA_RPC_ID_DUMMY                  = 0xAAAA0000,
+    KRDMA_RPC_ID_ALLOC_REMOTE_MEMORY    = 0xAAAA0001,
+    KRDMA_RPC_ID_FREE_REMOTE_MEMORY     = 0xAAAA0002,
 };
 
 enum krdma_recv_type {
@@ -45,10 +50,11 @@ enum krdma_recv_type {
 };
 
 struct krdma_rpc {
-    u32 id;
+    u32 rpc_id;
     u32 type;
     u32 send_completion;
     u32 recv_completion;
+    s32 ret_code;
     u64 send_ptr;
     u64 recv_ptr;
     u64 payload;
@@ -80,9 +86,19 @@ struct krdma_rpc_work {
 
 struct krdma_rpc_func {
     struct hlist_node hn;
-    u32 id;
-    void (*func)(struct krdma_rpc_work *, void *);
-    void *ctx;
+    u32 rpc_id;
+    void (*func)(struct krdma_rpc_work *);
+};
+
+/*
+ * RDMA related
+ */
+struct krdma_mr {
+    struct krdma_conn *conn;
+    u64 size;
+    u64 vaddr;
+    dma_addr_t paddr;
+    u32 rkey;
 };
 
 struct krdma_qp {
@@ -90,6 +106,18 @@ struct krdma_qp {
     struct ib_cq *cq;
 };
 
+int krdma_poll_completion(struct ib_cq *cq, u64 *completion);
+int krdma_poll_cq_one(struct ib_cq *cq);
+
+#define krdma_read(conn, kmr, addr, offset, length) \
+    krdma_io(conn, kmr, addr, offset, length, READ)
+#define krdma_write(conn, kmr, addr, offset, length) \
+    krdma_io(conn, kmr, addr, offset, length, WRITE)
+int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t addr, u64 offset, u64 length, int dir);
+
+/*
+ * CM related
+ */
 struct krdma_conn {
     struct hlist_node hn;
     char nodename[__NEW_UTS_LEN + 1];
@@ -116,7 +144,14 @@ struct krdma_msg_pool *krdma_msg_pool_create(struct krdma_conn *conn, unsigned l
 void krdma_msg_pool_destroy(struct krdma_msg_pool *pool);
 struct krdma_msg *krdma_msg_pool_get(struct krdma_msg_pool *pool);
 void krdma_msg_pool_put(struct krdma_msg_pool *pool, struct krdma_msg *msg);
-int krdma_rpc_register(u32 id, void (*func)(struct krdma_rpc_work *, void *), void *ctx);
+
+/*
+ * Exported APIs
+ */
+int krdma_rpc_register(u32 id, void (*func)(struct krdma_rpc_work *));
 void krdma_rpc_unregister(u32 id);
+struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size);
+int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr);
+int krdma_get_all_nodes(struct krdma_conn *nodes[], int n);
 
 #endif /* _INCLUDE_KRDMA_H_ */

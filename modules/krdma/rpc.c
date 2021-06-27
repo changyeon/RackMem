@@ -19,9 +19,106 @@ struct kmem_cache *rpc_work_cache;
 static DEFINE_SPINLOCK(rpc_ht_lock);
 static DEFINE_HASHTABLE(rpc_ht, 10);
 
-static void dummy_rpc_handler(struct krdma_rpc_work *rpc_work, void *ctx)
+
+struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size)
 {
     int ret;
+    struct krdma_msg *send_msg, *recv_msg;
+    struct krdma_rpc *send_rpc, *recv_rpc;
+    const struct ib_send_wr *bad_send_wr;
+    const struct ib_recv_wr *bad_recv_wr;
+
+    volatile u32 *send_completion;
+    volatile u32 *recv_completion;
+
+    struct krdma_mr *kmr = NULL;
+    u64 vaddr, paddr, rkey;
+
+    DEBUG_LOG("krdma_alloc_remote_memory: %llu\n", size);
+
+    /* Step 1: get a send message from the pool */
+    send_msg = krdma_msg_pool_get(conn->send_msg_pool);
+
+    /* Step 2: fill the message with the RPC request data */
+    send_rpc = (struct krdma_rpc *) send_msg->buf;
+    send_rpc->rpc_id = KRDMA_RPC_ID_ALLOC_REMOTE_MEMORY;
+    send_rpc->type = KRDMA_RPC_REQUEST;
+    send_rpc->send_completion = 0;
+    send_rpc->recv_completion = 0;
+    send_rpc->ret_code = 0;
+    send_rpc->send_ptr = (u64) send_msg;
+    send_rpc->recv_ptr = 0;
+
+    ((u64 *) &send_rpc->payload)[0] = size;
+
+    /* Step 3: post send */
+    DEBUG_LOG("krdma_alloc_remote_memory: post_send\n");
+    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        kmr = NULL;
+        goto out;
+    }
+
+    /* Step 4: poll send completion */
+    DEBUG_LOG("krdma_alloc_remote_memory: poll send\n");
+    send_completion = &send_rpc->send_completion;
+    while ((*send_completion) == 0);
+
+    /* Step 5: poll recv completion */
+    DEBUG_LOG("krdma_alloc_remote_memory: poll recv\n");
+    recv_completion = &send_rpc->recv_completion;
+    while ((*recv_completion) == 0);
+
+    /* Step 6: read the received message */
+    recv_msg = (struct krdma_msg *) send_rpc->recv_ptr;
+    recv_rpc = (struct krdma_rpc *) recv_msg->buf;
+
+    if (recv_rpc->ret_code) {
+        pr_err("failed RPC request\n");
+        kmr = NULL;
+        goto out_post_recv;
+    }
+    DEBUG_LOG("krdma_alloc_remote_memory: ret_code: %d\n", recv_rpc->ret_code);
+
+    kmr = kzalloc(sizeof(*kmr), GFP_KERNEL);
+    if (kmr == NULL) {
+        pr_err("failed to allocate memory for krdma_mr\n");
+        goto out_post_recv;
+    }
+
+    vaddr = ((u64 *) &recv_rpc->payload)[1];
+    paddr = ((u64 *) &recv_rpc->payload)[2];
+    rkey = ((u64 *) &recv_rpc->payload)[3];
+
+    DEBUG_LOG("krdma_alloc_remote_memory: (%llu:%llu:%llu)\n", vaddr, paddr, rkey);
+
+    kmr->conn = conn;
+    kmr->size = size;
+    kmr->vaddr = vaddr;
+    kmr->paddr = paddr;
+    kmr->rkey = (u32) rkey;
+
+out_post_recv:
+    /* Step 7: post the recv message */
+    ret = ib_post_recv(conn->rdma_qp.qp, &recv_msg->recv_wr, &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        /* TODO: free the remote memory */
+        goto out;
+    }
+
+out:
+    /* Step 8: put the send message */
+    krdma_msg_pool_put(conn->send_msg_pool, send_msg);
+
+    return kmr;
+}
+EXPORT_SYMBOL(krdma_alloc_remote_memory);
+
+static void alloc_remote_memory_rpc_handler(struct krdma_rpc_work *rpc_work)
+{
+    u32 ret = 0;
     struct krdma_conn *conn;
     struct krdma_msg *send_msg, *recv_msg;
     struct krdma_rpc *send_rpc, *recv_rpc;
@@ -29,34 +126,49 @@ static void dummy_rpc_handler(struct krdma_rpc_work *rpc_work, void *ctx)
     const struct ib_recv_wr *bad_recv_wr;
     volatile u32 *send_completion;
 
+    struct ib_device *ib_dev;
+    void *buf;
+    size_t size;
+    dma_addr_t dma_addr;
+
+    DEBUG_LOG("alloc_remote_memory_rpc_handler\n");
+
     conn = rpc_work->conn;
     recv_msg = rpc_work->recv_msg;
     recv_rpc = (struct krdma_rpc *) recv_msg->buf;
 
     /* Step 1: process the RPC request */
-    DEBUG_LOG("requested id: %u\n", recv_rpc->id);
-    DEBUG_LOG("requested send_ptr: %llu\n", (u64) recv_rpc->send_ptr);
-    DEBUG_LOG("requested result[0]: %lu\n", ((unsigned long *) &recv_rpc->payload)[0]);
-    DEBUG_LOG("requested result[1]: %lu\n", ((unsigned long *) &recv_rpc->payload)[1]);
-    DEBUG_LOG("requested result[2]: %lu\n", ((unsigned long *) &recv_rpc->payload)[2]);
-    DEBUG_LOG("requested result[3]: %lu\n", ((unsigned long *) &recv_rpc->payload)[3]);
-    DEBUG_LOG("requested result[4]: %lu\n", ((unsigned long *) &recv_rpc->payload)[4]);
+    size = (size_t) ((u64 *) &recv_rpc->payload)[0];
+    ib_dev = conn->cm_id->device;
 
-    /* Step 2: make a result message */
+    DEBUG_LOG("requested_size: %lu\n", size);
+
+    buf = ib_dma_alloc_coherent(ib_dev, size, &dma_addr, GFP_KERNEL);
+
+    DEBUG_LOG("please show me this message!!!!: %llu, %llu\n", (u64) buf, dma_addr);
+
+    if (buf == NULL) {
+        pr_err("failed to allocate memory for kmr buffer\n");
+        ret = ENOMEM;
+    }
+
+    DEBUG_LOG("[!!!] size: %llu, local buf: %llu, dma_addr: %llu\n", (u64) size, (u64) buf, dma_addr);
+
+    /* Step 2: make result message */
     send_msg = krdma_msg_pool_get(conn->send_msg_pool);
     send_rpc = (struct krdma_rpc *) send_msg->buf;
-    send_rpc->id = recv_rpc->id;
+    send_rpc->rpc_id = recv_rpc->rpc_id;
     send_rpc->type = KRDMA_RPC_RESPONSE;
     send_rpc->send_completion = 0;
     send_rpc->recv_completion = 0;
+    send_rpc->ret_code = ret;
     send_rpc->send_ptr = recv_rpc->send_ptr;
     send_rpc->recv_ptr = 0;
 
-    ((unsigned long *) &send_rpc->payload)[0] = 5;
-    ((unsigned long *) &send_rpc->payload)[1] = 4;
-    ((unsigned long *) &send_rpc->payload)[2] = 3;
-    ((unsigned long *) &send_rpc->payload)[3] = 2;
-    ((unsigned long *) &send_rpc->payload)[4] = 1;
+    ((u64 *) &send_rpc->payload)[0] = size;
+    ((u64 *) &send_rpc->payload)[1] = (u64) buf;
+    ((u64 *) &send_rpc->payload)[2] = (u64) dma_addr;
+    ((u64 *) &send_rpc->payload)[3] = (u64) conn->pd->unsafe_global_rkey;
 
     /* Step 3: post send */
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
@@ -86,13 +198,229 @@ out:
     return;
 }
 
-int krdma_rpc_register(u32 id, void (*func)(struct krdma_rpc_work *, void *),
-                       void *ctx)
+int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr)
+{
+    int ret = 0;
+    struct krdma_msg *send_msg, *recv_msg;
+    struct krdma_rpc *send_rpc, *recv_rpc;
+    const struct ib_send_wr *bad_send_wr;
+    const struct ib_recv_wr *bad_recv_wr;
+
+    volatile u32 *send_completion;
+    volatile u32 *recv_completion;
+
+    DEBUG_LOG("krdma_alloc_remote_memory: %p\n", kmr);
+
+    /* Step 1: get a send message from the pool */
+    send_msg = krdma_msg_pool_get(conn->send_msg_pool);
+
+    /* Step 2: fill the message with the RPC request data */
+    send_rpc = (struct krdma_rpc *) send_msg->buf;
+    send_rpc->rpc_id = KRDMA_RPC_ID_FREE_REMOTE_MEMORY;
+    send_rpc->type = KRDMA_RPC_REQUEST;
+    send_rpc->send_completion = 0;
+    send_rpc->recv_completion = 0;
+    send_rpc->ret_code = 0;
+    send_rpc->send_ptr = (u64) send_msg;
+    send_rpc->recv_ptr = 0;
+
+    ((u64 *) &send_rpc->payload)[0] = kmr->size;
+    ((u64 *) &send_rpc->payload)[1] = kmr->vaddr;
+    ((u64 *) &send_rpc->payload)[2] = kmr->paddr;
+
+    DEBUG_LOG("request free (%llu:%llu:%llu)\n", kmr->size, kmr->vaddr, kmr->paddr);
+
+    /* Step 3: post send */
+    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        ret = -EINVAL;
+        goto out;
+    }
+
+    /* Step 4: poll send completion */
+    send_completion = &send_rpc->send_completion;
+    while ((*send_completion) == 0);
+
+    /* Step 5: poll recv completion */
+    recv_completion = &send_rpc->recv_completion;
+    while ((*recv_completion) == 0);
+
+    /* Step 6: read the received message */
+    recv_msg = (struct krdma_msg *) send_rpc->recv_ptr;
+    recv_rpc = (struct krdma_rpc *) recv_msg->buf;
+
+    if (recv_rpc->ret_code) {
+        pr_err("failed RPC request\n");
+        ret = -EINVAL;
+        goto out_post_recv;
+    }
+
+out_post_recv:
+    /* Step 7: post the recv message */
+    ret = ib_post_recv(conn->rdma_qp.qp, &recv_msg->recv_wr, &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        goto out;
+    }
+
+out:
+    /* Step 8: put the send message */
+    krdma_msg_pool_put(conn->send_msg_pool, send_msg);
+
+    return ret;
+}
+EXPORT_SYMBOL(krdma_free_remote_memory);
+
+static void free_remote_memory_rpc_handler(struct krdma_rpc_work *rpc_work)
+{
+    int ret = 0;
+    struct krdma_conn *conn;
+    struct krdma_msg *send_msg, *recv_msg;
+    struct krdma_rpc *send_rpc, *recv_rpc;
+    const struct ib_send_wr *bad_send_wr;
+    const struct ib_recv_wr *bad_recv_wr;
+    volatile u32 *send_completion;
+
+    struct ib_device *ib_dev;
+    size_t size;
+    void *buf;
+    dma_addr_t paddr;
+
+    DEBUG_LOG("free_remote_memory_rpc_handler\n");
+
+    conn = rpc_work->conn;
+    recv_msg = rpc_work->recv_msg;
+    recv_rpc = (struct krdma_rpc *) recv_msg->buf;
+
+    /* Step 1: process the RPC request */
+    size = (size_t) (((u64 *) &recv_rpc->payload)[0]);
+    buf = (void *) (((u64 *) &recv_rpc->payload)[1]);
+    paddr = (dma_addr_t) (((u64 *) &recv_rpc->payload)[2]);
+
+    DEBUG_LOG("[!!!] got free request (%llu:%llu:%llu)\n", (u64) size, (u64) buf, (u64) paddr);
+
+    ib_dev = conn->cm_id->device;
+
+    ib_dma_free_coherent(ib_dev, size, buf, paddr);
+
+    /* Step 2: make result message */
+    send_msg = krdma_msg_pool_get(conn->send_msg_pool);
+    send_rpc = (struct krdma_rpc *) send_msg->buf;
+    send_rpc->rpc_id = recv_rpc->rpc_id;
+    send_rpc->type = KRDMA_RPC_RESPONSE;
+    send_rpc->send_completion = 0;
+    send_rpc->recv_completion = 0;
+    send_rpc->ret_code = ret;
+    send_rpc->send_ptr = recv_rpc->send_ptr;
+    send_rpc->recv_ptr = 0;
+
+    ((u64 *) &send_rpc->payload)[0] = size;
+
+    /* Step 3: post send */
+    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
+
+    /* Step 4: poll send completion */
+    send_completion = &send_rpc->send_completion;
+    while ((*send_completion) == 0);
+
+out:
+    /* Step 5: post the recv message */
+    ret = ib_post_recv(conn->rpc_qp.qp, &recv_msg->recv_wr, &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        goto out;
+    }
+
+    /* Step 6: put the send message */
+    krdma_msg_pool_put(conn->send_msg_pool, send_msg);
+
+    /* Step 7: put the rpc_work to the cache */
+    kmem_cache_free(rpc_work_cache, rpc_work);
+
+    return;
+}
+
+static void dummy_rpc_handler(struct krdma_rpc_work *rpc_work)
+{
+    int ret = 0;
+    struct krdma_conn *conn;
+    struct krdma_msg *send_msg, *recv_msg;
+    struct krdma_rpc *send_rpc, *recv_rpc;
+    const struct ib_send_wr *bad_send_wr;
+    const struct ib_recv_wr *bad_recv_wr;
+    volatile u32 *send_completion;
+
+    DEBUG_LOG("dummy_rpc_handler\n");
+
+    conn = rpc_work->conn;
+    recv_msg = rpc_work->recv_msg;
+    recv_rpc = (struct krdma_rpc *) recv_msg->buf;
+
+    /* Step 1: process the RPC request */
+    DEBUG_LOG("requested rpc_id: %u\n", recv_rpc->rpc_id);
+    DEBUG_LOG("requested send_ptr: %llu\n", (u64) recv_rpc->send_ptr);
+    DEBUG_LOG("requested result[0]: %llu\n", ((u64 *) &recv_rpc->payload)[0]);
+    DEBUG_LOG("requested result[1]: %llu\n", ((u64 *) &recv_rpc->payload)[1]);
+    DEBUG_LOG("requested result[2]: %llu\n", ((u64 *) &recv_rpc->payload)[2]);
+    DEBUG_LOG("requested result[3]: %llu\n", ((u64 *) &recv_rpc->payload)[3]);
+    DEBUG_LOG("requested result[4]: %llu\n", ((u64 *) &recv_rpc->payload)[4]);
+
+    /* Step 2: make result message */
+    send_msg = krdma_msg_pool_get(conn->send_msg_pool);
+    send_rpc = (struct krdma_rpc *) send_msg->buf;
+    send_rpc->rpc_id = recv_rpc->rpc_id;
+    send_rpc->type = KRDMA_RPC_RESPONSE;
+    send_rpc->send_completion = 0;
+    send_rpc->recv_completion = 0;
+    send_rpc->ret_code = ret;
+    send_rpc->send_ptr = recv_rpc->send_ptr;
+    send_rpc->recv_ptr = 0;
+
+    ((u64 *) &send_rpc->payload)[0] = 5;
+    ((u64 *) &send_rpc->payload)[1] = 4;
+    ((u64 *) &send_rpc->payload)[2] = 3;
+    ((u64 *) &send_rpc->payload)[3] = 2;
+    ((u64 *) &send_rpc->payload)[4] = 1;
+
+    /* Step 3: post send */
+    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
+
+    /* Step 4: poll send completion */
+    send_completion = &send_rpc->send_completion;
+    while ((*send_completion) == 0);
+
+out:
+    /* Step 5: post the recv message */
+    ret = ib_post_recv(conn->rpc_qp.qp, &recv_msg->recv_wr, &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        goto out;
+    }
+
+    /* Step 6: put the send message */
+    krdma_msg_pool_put(conn->send_msg_pool, send_msg);
+
+    /* Step 7: put the rpc_work to the cache */
+    kmem_cache_free(rpc_work_cache, rpc_work);
+
+    return;
+}
+
+int krdma_rpc_register(u32 rpc_id, void (*func)(struct krdma_rpc_work *))
 {
     int ret;
     struct krdma_rpc_func *rpc_func;
 
-    DEBUG_LOG("krdma_rpc_register id: %u, func: %p\n", id, func);
+    DEBUG_LOG("krdma_rpc_register rpc_id: %u, func: %p\n", rpc_id, func);
 
     rpc_func = kzalloc(sizeof(*rpc_func), GFP_KERNEL);
     if (rpc_func == NULL) {
@@ -101,12 +429,11 @@ int krdma_rpc_register(u32 id, void (*func)(struct krdma_rpc_work *, void *),
         goto out;
     }
 
-    rpc_func->id = id;
+    rpc_func->rpc_id = rpc_id;
     rpc_func->func = func;
-    rpc_func->ctx = ctx;
 
     spin_lock(&rpc_ht_lock);
-    hash_add(rpc_ht, &rpc_func->hn, rpc_func->id);
+    hash_add(rpc_ht, &rpc_func->hn, rpc_func->rpc_id);
     spin_unlock(&rpc_ht_lock);
 
     return 0;
@@ -116,15 +443,15 @@ out:
 }
 EXPORT_SYMBOL(krdma_rpc_register);
 
-void krdma_rpc_unregister(u32 id)
+void krdma_rpc_unregister(u32 rpc_id)
 {
     struct krdma_rpc_func *curr;
 
-    DEBUG_LOG("krdma_unregister_rpc id: %u\n", id);
+    DEBUG_LOG("krdma_unregister_rpc rpc_id: %u\n", rpc_id);
 
     spin_lock(&rpc_ht_lock);
-    hash_for_each_possible(rpc_ht, curr, hn, id) {
-        if (curr->id == id) {
+    hash_for_each_possible(rpc_ht, curr, hn, rpc_id) {
+        if (curr->rpc_id == rpc_id) {
             hash_del(&curr->hn);
             kfree(curr);
             break;
@@ -153,28 +480,28 @@ static void krdma_free_rpc_table(void)
 /* We process the RPC request in a separate task */
 static void process_rpc_request(struct work_struct *ws)
 {
-    u32 id;
+    u32 rpc_id;
     struct krdma_rpc_func *curr;
     struct krdma_rpc_work *rpc_work;
 
     rpc_work = container_of(ws, struct krdma_rpc_work, ws);
 
-    id = ((struct krdma_rpc *) rpc_work->recv_msg->buf)->id;
+    rpc_id = ((struct krdma_rpc *) rpc_work->recv_msg->buf)->rpc_id;
 
     spin_lock(&rpc_ht_lock);
-    hash_for_each_possible(rpc_ht, curr, hn, id)
-        if (curr->id == id)
+    hash_for_each_possible(rpc_ht, curr, hn, rpc_id)
+        if (curr->rpc_id == rpc_id)
             break;
     spin_unlock(&rpc_ht_lock);
 
-    if (curr->id != id) {
-        pr_err("failed to lookup the RPC id in the table: %u\n", id);
+    if (curr->rpc_id != rpc_id) {
+        pr_err("failed to lookup the RPC id in the table: %u\n", rpc_id);
         goto out;
     }
 
     /* process the RPC request */
-    DEBUG_LOG("process_rpc_request: %u\n", id);
-    curr->func(rpc_work, curr->ctx);
+    DEBUG_LOG("process_rpc_request: %u\n", rpc_id);
+    curr->func(rpc_work);
 
 out:
     return;
@@ -444,6 +771,7 @@ void krdma_msg_pool_put(struct krdma_msg_pool *pool, struct krdma_msg *msg)
 int krdma_rpc_setup(void)
 {
     int ret, flags;
+    u32 rpc_id;
 
     flags = 0;
     rpc_work_cache = kmem_cache_create(
@@ -455,18 +783,31 @@ int krdma_rpc_setup(void)
         goto out;
     }
 
-    ret = krdma_rpc_register(KRDMA_RPC_ID_DUMMY, dummy_rpc_handler, NULL);
+    rpc_id = KRDMA_RPC_ID_DUMMY;
+    ret = krdma_rpc_register(rpc_id, dummy_rpc_handler);
     if (ret) {
-        pr_err("failed to register rpc\n");
+        pr_err("failed to register rpc_id: %x\n", rpc_id);
         goto out_destroy_rpc_work_cache;
+    }
+
+    rpc_id = KRDMA_RPC_ID_ALLOC_REMOTE_MEMORY;
+    ret = krdma_rpc_register(rpc_id, alloc_remote_memory_rpc_handler);
+    if (ret) {
+        pr_err("failed to register rpc_id: %x\n", rpc_id);
+        goto out_free_rpc_table;
+    }
+
+    rpc_id = KRDMA_RPC_ID_FREE_REMOTE_MEMORY;
+    ret = krdma_rpc_register(rpc_id, free_remote_memory_rpc_handler);
+    if (ret) {
+        pr_err("failed to register rpc_id: %x\n", rpc_id);
+        goto out_free_rpc_table;
     }
 
     return 0;
 
-/*
- *out_free_rpc_table:
- *    krdma_free_rpc_table();
- */
+out_free_rpc_table:
+    krdma_free_rpc_table();
 out_destroy_rpc_work_cache:
     kmem_cache_destroy(rpc_work_cache);
 out:
