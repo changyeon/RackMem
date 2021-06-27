@@ -35,76 +35,6 @@ struct krdma_ib_dev {
     struct ib_device *ib_dev;
 };
 
-static void test_rpc(struct krdma_conn *conn)
-{
-    int ret;
-    struct krdma_msg *send_msg, *recv_msg;
-    struct krdma_rpc *send_rpc, *recv_rpc;
-    const struct ib_send_wr *bad_send_wr;
-    const struct ib_recv_wr *bad_recv_wr;
-
-    volatile u32 *send_completion;
-    volatile u32 *recv_completion;
-
-    /* Step 1: get a send message from the pool */
-    send_msg = krdma_msg_pool_get(conn->send_msg_pool);
-
-    /* Step 2: fill the message with the RPC request data */
-    send_rpc = (struct krdma_rpc *) send_msg->buf;
-    send_rpc->rpc_id = KRDMA_RPC_ID_DUMMY;
-    send_rpc->type = KRDMA_RPC_REQUEST;
-    send_rpc->send_completion = 0;
-    send_rpc->recv_completion = 0;
-    send_rpc->ret_code = 0;
-    send_rpc->send_ptr = (u64) send_msg;
-    send_rpc->recv_ptr = 0;
-
-    ((u64 *) &send_rpc->payload)[0] = 1;
-    ((u64 *) &send_rpc->payload)[1] = 2;
-    ((u64 *) &send_rpc->payload)[2] = 3;
-    ((u64 *) &send_rpc->payload)[3] = 4;
-    ((u64 *) &send_rpc->payload)[4] = 5;
-
-    /* Step 3: post send */
-    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
-    if (ret) {
-        pr_err("error on ib_post_send: %d\n", ret);
-        goto out;
-    }
-
-    /* Step 4: poll send completion */
-    send_completion = &send_rpc->send_completion;
-    while ((*send_completion) == 0);
-
-    /* Step 5: poll recv completion */
-    recv_completion = &send_rpc->recv_completion;
-    while ((*recv_completion) == 0);
-
-    /* Step 6: read the received message */
-    recv_msg = (struct krdma_msg *) send_rpc->recv_ptr;
-    recv_rpc = (struct krdma_rpc *) recv_msg->buf;
-
-    pr_info("received ret_code: %d\n", recv_rpc->ret_code);
-    pr_info("received rpc_id: %u\n", recv_rpc->rpc_id);
-    pr_info("received send_ptr: %llu\n", (u64) recv_rpc->send_ptr);
-    pr_info("received result[0]: %llu\n", ((u64 *) &recv_rpc->payload)[0]);
-    pr_info("received result[1]: %llu\n", ((u64 *) &recv_rpc->payload)[1]);
-    pr_info("received result[2]: %llu\n", ((u64 *) &recv_rpc->payload)[2]);
-    pr_info("received result[3]: %llu\n", ((u64 *) &recv_rpc->payload)[3]);
-    pr_info("received result[4]: %llu\n", ((u64 *) &recv_rpc->payload)[4]);
-
-    /* Step 7: post the recv message */
-    ret = ib_post_recv(conn->rdma_qp.qp, &recv_msg->recv_wr, &bad_recv_wr);
-    if (ret) {
-        pr_err("error on ib_post_recv: %d\n", ret);
-        goto out;
-    }
-
-out:
-    /* Step 8: put the send message */
-    krdma_msg_pool_put(conn->send_msg_pool, send_msg);
-}
-
 static int poll_cq_one(struct ib_cq *cq)
 {
     int ret;
@@ -1023,6 +953,8 @@ int krdma_connect(char *server, int port)
         ret = -ETIMEDOUT;
         goto out_destroy_cm_id;
     }
+
+    krdma_test_rpc_performance(conn, 8);
 
     return 0;
 

@@ -150,8 +150,10 @@ void krdma_msg_pool_put(struct krdma_msg_pool *pool, struct krdma_msg *msg);
  */
 int krdma_rpc_register(u32 id, void (*func)(struct krdma_rpc_work *));
 void krdma_rpc_unregister(u32 id);
+void krdma_dummy_rpc(struct krdma_conn *conn);
 struct krdma_mr *krdma_alloc_remote_memory(struct krdma_conn *conn, u64 size);
 int krdma_free_remote_memory(struct krdma_conn *conn, struct krdma_mr *kmr);
 int krdma_get_all_nodes(struct krdma_conn *nodes[], int n);
+int krdma_test_rpc_performance(struct krdma_conn *conn, int nr_threads);
 
 #endif /* _INCLUDE_KRDMA_H_ */
