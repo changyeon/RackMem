@@ -5,6 +5,7 @@
 #include <linux/socket.h>
 #include <linux/stringhash.h>
 #include <linux/random.h>
+#include <linux/time.h>
 
 
 #include "cm.h"
@@ -33,6 +34,74 @@ struct krdma_ib_dev {
     struct list_head head;
     struct ib_device *ib_dev;
 };
+
+static void test_rpc(struct krdma_conn *conn)
+{
+    int ret;
+    struct krdma_msg *send_msg, *recv_msg;
+    struct krdma_rpc *send_rpc, *recv_rpc;
+    const struct ib_send_wr *bad_send_wr;
+    const struct ib_recv_wr *bad_recv_wr;
+
+    volatile u32 *send_completion;
+    volatile u32 *recv_completion;
+
+    /* Step 1: get a send message from the pool */
+    send_msg = krdma_msg_pool_get(conn->send_msg_pool);
+
+    /* Step 2: fill the message with the RPC request data */
+    send_rpc = (struct krdma_rpc *) send_msg->buf;
+    send_rpc->id = 22419;
+    send_rpc->type = KRDMA_RPC_REQUEST;
+    send_rpc->send_completion = 0;
+    send_rpc->recv_completion = 0;
+    send_rpc->send_ptr = (u64) send_msg;
+    send_rpc->recv_ptr = 0;
+
+    ((unsigned long *) &send_rpc->payload)[0] = 1;
+    ((unsigned long *) &send_rpc->payload)[1] = 2;
+    ((unsigned long *) &send_rpc->payload)[2] = 3;
+    ((unsigned long *) &send_rpc->payload)[3] = 4;
+    ((unsigned long *) &send_rpc->payload)[4] = 5;
+
+    /* Step 3: post send */
+    ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
+    if (ret) {
+        pr_err("error on ib_post_send: %d\n", ret);
+        goto out;
+    }
+
+    /* Step 4: poll send completion */
+    send_completion = &send_rpc->send_completion;
+    while ((*send_completion) == 0);
+
+    /* Step 5: poll recv completion */
+    recv_completion = &send_rpc->recv_completion;
+    while ((*recv_completion) == 0);
+
+    /* Step 6: read the received message */
+    recv_msg = (struct krdma_msg *) send_rpc->recv_ptr;
+    recv_rpc = (struct krdma_rpc *) recv_msg->buf;
+
+    pr_info("received id: %u\n", recv_rpc->id);
+    pr_info("received send_ptr: %llu\n", (u64) recv_rpc->send_ptr);
+    pr_info("received result[0]: %lu\n", ((unsigned long *) &recv_rpc->payload)[0]);
+    pr_info("received result[1]: %lu\n", ((unsigned long *) &recv_rpc->payload)[1]);
+    pr_info("received result[2]: %lu\n", ((unsigned long *) &recv_rpc->payload)[2]);
+    pr_info("received result[3]: %lu\n", ((unsigned long *) &recv_rpc->payload)[3]);
+    pr_info("received result[4]: %lu\n", ((unsigned long *) &recv_rpc->payload)[4]);
+
+    /* Step 7: post the recv message */
+    ret = ib_post_recv(conn->rdma_qp.qp, &recv_msg->recv_wr, &bad_recv_wr);
+    if (ret) {
+        pr_err("error on ib_post_recv: %d\n", ret);
+        goto out;
+    }
+
+out:
+    /* Step 8: put the send message */
+    krdma_msg_pool_put(conn->send_msg_pool, send_msg);
+}
 
 static int poll_cq_one(struct ib_cq *cq)
 {
@@ -120,6 +189,13 @@ out:
     return ret;
 }
 
+static int handshake(struct krdma_conn *conn, bool server)
+{
+    if (server)
+        return handshake_server(conn);
+    else
+        return handshake_client(conn);
+}
 
 static void cleanup_connection(struct work_struct *ws)
 {
@@ -329,6 +405,149 @@ out:
     return ret;
 }
 
+static int established(struct krdma_conn *conn, bool server)
+{
+    int ret;
+    char side[8];
+    struct krdma_msg *msg;
+    const struct ib_recv_wr *bad_recv_wr;
+    struct ib_qp_attr qp_attr;
+    struct ib_qp_init_attr qp_init_attr;
+    u32 local_qpn, local_psn, remote_qpn, remote_psn;
+
+    strcpy(side, server ? "server" : "client");
+
+    DEBUG_LOG("established %s: %p\n", side, conn->cm_id->device);
+
+    /* Step 1: exchange the node name */
+    strcpy((char *) conn->send_msg->buf, g_nodename);
+
+    ret = handshake(conn, server);
+    if (ret) {
+        pr_err("error on handshake\n");
+        goto out;
+    }
+
+    strcpy(conn->nodename, (char *) conn->recv_msg->buf);
+    conn->nodehash = hashlen_hash(hashlen_string(NULL, conn->nodename));
+    DEBUG_LOG("established %s: handshake nodename: %s, nodehash: %u\n",
+              side, conn->nodename, conn->nodehash);
+
+    /* Step 2: allocate rpc_qp */
+    ret = allocate_rpc_qp(conn);
+    if (ret) {
+        pr_err("error on allocate_rpc_qp: %d\n", ret);
+        goto out;
+    }
+
+    /* Step 3: allocate a RPC message pool */
+    conn->send_msg_pool = krdma_msg_pool_create(
+            conn, KRDMA_SEND_MSG_POOL_SIZE, KRDMA_SEND_MSG_SIZE);
+    if (conn->send_msg_pool == NULL) {
+        pr_err("failed to allocate send message pool\n");
+        ret = -ENOMEM;
+        goto out_destroy_rpc_qp;
+    }
+
+    conn->recv_msg_pool = krdma_msg_pool_create(
+            conn, KRDMA_RECV_MSG_POOL_SIZE, KRDMA_RECV_MSG_SIZE);
+    if (conn->recv_msg_pool == NULL) {
+        pr_err("failed to allocate recv message pool\n");
+        ret = -ENOMEM;
+        goto out_destroy_send_msg_pool;
+    }
+
+    /* Step 4: post the RPC message pool */
+    spin_lock(&conn->recv_msg_pool->lock);
+    list_for_each_entry(msg, &conn->recv_msg_pool->lh, lh) {
+        ret = ib_post_recv(conn->rpc_qp.qp, &msg->recv_wr, &bad_recv_wr);
+        if (ret) {
+            pr_err("error on ib_post_recv: %d\n", ret);
+            goto out_destroy_recv_msg_pool;
+        }
+    }
+    spin_unlock(&conn->recv_msg_pool->lock);
+
+    /* Step 5: exchange the QP data */
+    local_qpn = conn->rpc_qp.qp->qp_num;
+    local_psn = get_random_int() & 0xFFFFFF;
+
+    ((u32 *) conn->send_msg->buf)[0] = local_qpn;
+    ((u32 *) conn->send_msg->buf)[1] = local_psn;
+
+    ret = handshake(conn, server);
+    if (ret) {
+        pr_err("error on handshake\n");
+        goto out;
+    }
+
+    remote_qpn = ((u32 *) conn->recv_msg->buf)[0];
+    remote_psn = ((u32 *) conn->recv_msg->buf)[1];
+
+    DEBUG_LOG("established_%s: handshake QP data: (%u, %u)\n",
+              side, remote_qpn, remote_psn);
+
+    /* Step 6: connect the QP, reuse the rdma_qp data */
+    memset(&qp_attr, 0, sizeof(qp_attr));
+    memset(&qp_init_attr, 0, sizeof(qp_init_attr));
+    ret = ib_query_qp(conn->rdma_qp.qp, &qp_attr, 0, &qp_init_attr);
+    if (ret) {
+        pr_err("error on ib_query_qp: %d\n", ret);
+        goto out;
+    }
+
+    ret = connect_qp(conn->rpc_qp.qp, &qp_attr, local_psn, remote_qpn,
+                     remote_psn);
+    if (ret) {
+        pr_err("failed to connect the rpc_qp\n");
+        goto out_destroy_recv_msg_pool;
+    }
+
+    /* Step XXX: register RPC calls */
+
+    /* Step XXX: Handshake before using RPCs */
+    ret = handshake(conn, server);
+    if (ret) {
+        pr_err("error on handshake_client\n");
+        goto out;
+    }
+
+    {
+        int ii, nn = 10;
+        ktime_t t1, t2;
+        s64 elapsed_time;
+        for (ii = 0; ii < nn; ii++) {
+            t1 = ktime_get();
+            test_rpc(conn);
+            t2 = ktime_get();
+            elapsed_time = ktime_to_ns(ktime_sub(t2, t1));
+            pr_info("rpc response: %lld\n", elapsed_time);
+        }
+    }
+
+    /* Step 7: add the connection to the hash table */
+    spin_lock(&conn_ht_lock);
+    hash_add(conn_ht, &conn->hn, conn->nodehash);
+    spin_unlock(&conn_ht_lock);
+
+    pr_info("connection established with %s (%u)\n", conn->nodename,
+            conn->nodehash);
+
+    return 0;
+
+out_destroy_recv_msg_pool:
+    krdma_msg_pool_destroy(conn->recv_msg_pool);
+    conn->recv_msg_pool = NULL;
+out_destroy_send_msg_pool:
+    krdma_msg_pool_destroy(conn->send_msg_pool);
+    conn->send_msg_pool = NULL;
+out_destroy_rpc_qp:
+    ib_destroy_qp(conn->rpc_qp.qp);
+    conn->rpc_qp.qp = NULL;
+out:
+    return ret;
+}
+
 static int addr_resolved(struct krdma_conn *conn)
 {
     int ret;
@@ -405,121 +624,6 @@ out:
     return ret;
 }
 
-static int established_client(struct krdma_conn *conn)
-{
-    int ret;
-    struct krdma_msg *msg;
-    const struct ib_recv_wr *bad_recv_wr;
-    struct ib_qp_attr qp_attr;
-    struct ib_qp_init_attr qp_init_attr;
-    u32 local_qpn, local_psn, remote_qpn, remote_psn;
-
-    DEBUG_LOG("established client: %p\n", conn->cm_id->device);
-
-    /* Step 1: exchange the node name */
-    strcpy((char *) conn->send_msg->buf, g_nodename);
-
-    ret = handshake_client(conn);
-    if (ret) {
-        pr_err("error on handshake_client\n");
-        goto out;
-    }
-
-    strcpy(conn->nodename, (char *) conn->recv_msg->buf);
-    conn->nodehash = hashlen_hash(hashlen_string(NULL, conn->nodename));
-    DEBUG_LOG("established client: handshake nodename: %s, nodehash: %u\n",
-              conn->nodename, conn->nodehash);
-
-    /* Step 2: allocate rpc_qp */
-    ret = allocate_rpc_qp(conn);
-    if (ret) {
-        pr_err("error on allocate_rpc_qp: %d\n", ret);
-        goto out;
-    }
-
-    /* Step 3: allocate a RPC message pool */
-    conn->send_msg_pool = krdma_msg_pool_create(
-            conn, KRDMA_SEND_MSG_POOL_SIZE, KRDMA_SEND_MSG_SIZE);
-    if (conn->send_msg_pool == NULL) {
-        pr_err("failed to allocate send message pool\n");
-        ret = -ENOMEM;
-        goto out_destroy_rpc_qp;
-    }
-
-    conn->recv_msg_pool = krdma_msg_pool_create(
-            conn, KRDMA_RECV_MSG_POOL_SIZE, KRDMA_RECV_MSG_SIZE);
-    if (conn->recv_msg_pool == NULL) {
-        pr_err("failed to allocate recv message pool\n");
-        ret = -ENOMEM;
-        goto out_destroy_send_msg_pool;
-    }
-
-    /* Step 4: post the RPC message pool */
-    spin_lock(&conn->recv_msg_pool->lock);
-    list_for_each_entry(msg, &conn->recv_msg_pool->lh, lh) {
-        ret = ib_post_recv(conn->rpc_qp.qp, &msg->recv_wr, &bad_recv_wr);
-        if (ret) {
-            pr_err("error on ib_post_recv: %d\n", ret);
-            goto out_destroy_recv_msg_pool;
-        }
-    }
-    spin_unlock(&conn->recv_msg_pool->lock);
-
-    /* Step 5: exchange the QP data */
-    local_qpn = conn->rpc_qp.qp->qp_num;
-    local_psn = get_random_int() & 0xFFFFFF;
-
-    ((u32 *) conn->send_msg->buf)[0] = local_qpn;
-    ((u32 *) conn->send_msg->buf)[1] = local_psn;
-
-    ret = handshake_client(conn);
-    if (ret) {
-        pr_err("error on handshake_client\n");
-        goto out;
-    }
-
-    remote_qpn = ((u32 *) conn->recv_msg->buf)[0];
-    remote_psn = ((u32 *) conn->recv_msg->buf)[1];
-
-    DEBUG_LOG("established_client: handshake QP data: (%u, %u)\n",
-              remote_qpn, remote_psn);
-
-    /* Step 6: connect the QP, reuse the rdma_qp data */
-    memset(&qp_attr, 0, sizeof(qp_attr));
-    memset(&qp_init_attr, 0, sizeof(qp_init_attr));
-    ret = ib_query_qp(conn->rdma_qp.qp, &qp_attr, 0, &qp_init_attr);
-    if (ret) {
-        pr_err("error on ib_query_qp: %d\n", ret);
-        goto out;
-    }
-
-    ret = connect_qp(conn->rpc_qp.qp, &qp_attr, local_psn, remote_qpn,
-                     remote_psn);
-    if (ret) {
-        pr_err("failed to connect the rpc_qp\n");
-        goto out_destroy_recv_msg_pool;
-    }
-
-    /* Step 7: add the connection to the hash table */
-    spin_lock(&conn_ht_lock);
-    hash_add(conn_ht, &conn->hn, conn->nodehash);
-    spin_unlock(&conn_ht_lock);
-
-    return 0;
-
-out_destroy_recv_msg_pool:
-    krdma_msg_pool_destroy(conn->recv_msg_pool);
-    conn->recv_msg_pool = NULL;
-out_destroy_send_msg_pool:
-    krdma_msg_pool_destroy(conn->send_msg_pool);
-    conn->send_msg_pool = NULL;
-out_destroy_rpc_qp:
-    ib_destroy_qp(conn->rpc_qp.qp);
-    conn->rpc_qp.qp = NULL;
-out:
-    return ret;
-}
-
 static int krdma_cm_event_handler_client(struct rdma_cm_id *cm_id,
                                          struct rdma_cm_event *ev)
 {
@@ -538,7 +642,7 @@ static int krdma_cm_event_handler_client(struct rdma_cm_id *cm_id,
         break;
     case RDMA_CM_EVENT_ESTABLISHED:
         /* complete cm_done regardless of sucess or failure */
-        ret = established_client(conn);
+        ret = established(conn, false);
         conn->cm_error = ret;
         complete(&conn->cm_done);
         return 0;
@@ -646,121 +750,6 @@ out:
     return ret;
 }
 
-static int established_server(struct krdma_conn *conn)
-{
-    int ret;
-    struct krdma_msg *msg;
-    const struct ib_recv_wr *bad_recv_wr;
-    struct ib_qp_attr qp_attr;
-    struct ib_qp_init_attr qp_init_attr;
-    u32 local_qpn, local_psn, remote_qpn, remote_psn;
-
-    DEBUG_LOG("established server: %p\n", conn->cm_id->device);
-
-    /* Step 1: exchange the node name */
-    strcpy((char *) conn->send_msg->buf, g_nodename);
-
-    ret = handshake_server(conn);
-    if (ret) {
-        pr_err("error on handshake_server\n");
-        goto out;
-    }
-
-    strcpy(conn->nodename, (char *) conn->recv_msg->buf);
-    conn->nodehash = hashlen_hash(hashlen_string(NULL, conn->nodename));
-    DEBUG_LOG("established server: handshake nodename: %s, nodehash: %u\n",
-              conn->nodename, conn->nodehash);
-
-    /* Step 2: allocate rpc_qp */
-    ret = allocate_rpc_qp(conn);
-    if (ret) {
-        pr_err("error on allocate_rpc_qp: %d\n", ret);
-        goto out;
-    }
-
-    /* Step 3: allocate a RPC message pool */
-    conn->send_msg_pool = krdma_msg_pool_create(
-            conn, KRDMA_SEND_MSG_POOL_SIZE, KRDMA_SEND_MSG_SIZE);
-    if (conn->send_msg_pool == NULL) {
-        pr_err("failed to allocate send message pool\n");
-        ret = -ENOMEM;
-        goto out_destroy_rpc_qp;
-    }
-
-    conn->recv_msg_pool = krdma_msg_pool_create(
-            conn, KRDMA_RECV_MSG_POOL_SIZE, KRDMA_RECV_MSG_SIZE);
-    if (conn->recv_msg_pool == NULL) {
-        pr_err("failed to allocate recv message pool\n");
-        ret = -ENOMEM;
-        goto out_destroy_send_msg_pool;
-    }
-
-    /* Step 4: post the RPC message pool */
-    spin_lock(&conn->recv_msg_pool->lock);
-    list_for_each_entry(msg, &conn->recv_msg_pool->lh, lh) {
-        ret = ib_post_recv(conn->rpc_qp.qp, &msg->recv_wr, &bad_recv_wr);
-        if (ret) {
-            pr_err("error on ib_post_recv: %d\n", ret);
-            goto out_destroy_recv_msg_pool;
-        }
-    }
-    spin_unlock(&conn->recv_msg_pool->lock);
-
-    /* Step 5: exchange the QP data */
-    local_qpn = conn->rpc_qp.qp->qp_num;
-    local_psn = get_random_int() & 0xFFFFFF;
-
-    ((u32 *) conn->send_msg->buf)[0] = local_qpn;
-    ((u32 *) conn->send_msg->buf)[1] = local_psn;
-
-    ret = handshake_server(conn);
-    if (ret) {
-        pr_err("error on handshake_server\n");
-        goto out;
-    }
-
-    remote_qpn = ((u32 *) conn->recv_msg->buf)[0];
-    remote_psn = ((u32 *) conn->recv_msg->buf)[1];
-
-    DEBUG_LOG("established_server: handshake QP data: (%u, %u)\n",
-              remote_qpn, remote_psn);
-
-    /* Step 6: connect the QP, reuse the rdma_qp data */
-    memset(&qp_attr, 0, sizeof(qp_attr));
-    memset(&qp_init_attr, 0, sizeof(qp_init_attr));
-    ret = ib_query_qp(conn->rdma_qp.qp, &qp_attr, 0, &qp_init_attr);
-    if (ret) {
-        pr_err("error on ib_query_qp: %d\n", ret);
-        goto out;
-    }
-
-    ret = connect_qp(conn->rpc_qp.qp, &qp_attr, local_psn, remote_qpn,
-                     remote_psn);
-    if (ret) {
-        pr_err("failed to connect the rpc_qp\n");
-        goto out_destroy_recv_msg_pool;
-    }
-
-    /* Step 7: add the connection to the hash table */
-    spin_lock(&conn_ht_lock);
-    hash_add(conn_ht, &conn->hn, conn->nodehash);
-    spin_unlock(&conn_ht_lock);
-
-    return 0;
-
-out_destroy_recv_msg_pool:
-    krdma_msg_pool_destroy(conn->recv_msg_pool);
-    conn->recv_msg_pool = NULL;
-out_destroy_send_msg_pool:
-    krdma_msg_pool_destroy(conn->send_msg_pool);
-    conn->send_msg_pool = NULL;
-out_destroy_rpc_qp:
-    ib_destroy_qp(conn->rpc_qp.qp);
-    conn->rpc_qp.qp = NULL;
-out:
-    return ret;
-}
-
 static int krdma_cm_event_handler_server(struct rdma_cm_id *cm_id,
                                          struct rdma_cm_event *ev)
 {
@@ -778,7 +767,7 @@ static int krdma_cm_event_handler_server(struct rdma_cm_id *cm_id,
         ret = connect_request(cm_id);
         break;
     case RDMA_CM_EVENT_ESTABLISHED:
-        ret = established_server(conn);
+        ret = established(conn, true);
         break;
     case RDMA_CM_EVENT_ADDR_CHANGE:
     case RDMA_CM_EVENT_DISCONNECTED:

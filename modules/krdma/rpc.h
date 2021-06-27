@@ -4,6 +4,8 @@
 #include <rdma/ib_verbs.h>
 #include <krdma.h>
 
+#define KRDMA_NR_CQ_POLL_ENTRIES    8
+
 void krdma_cq_comp_handler(struct ib_cq *cq, void *ctx);
 void krdma_cq_event_handler(struct ib_event *event, void *ctx);
 struct krdma_msg *krdma_msg_alloc(struct krdma_conn *conn, unsigned long size);

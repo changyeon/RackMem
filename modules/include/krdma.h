@@ -4,20 +4,50 @@
 #include <rdma/rdma_cm.h>
 #include <linux/utsname.h>
 
-#define KRDMA_MAX_SEND_WR       128UL
-#define KRDMA_MAX_RECV_WR       128UL
-#define KRDMA_MAX_SEND_SGE      16UL
-#define KRDMA_MAX_RECV_SGE      16UL
+#define KRDMA_MAX_SEND_WR           128UL
+#define KRDMA_MAX_RECV_WR           128UL
+#define KRDMA_MAX_SEND_SGE          16UL
+#define KRDMA_MAX_RECV_SGE          16UL
 
-#define KRDMA_RETRY_COUNT       128UL
-#define KRDMA_RNR_RETRY_COUNT   128UL
+#define KRDMA_RETRY_COUNT           128UL
+#define KRDMA_RNR_RETRY_COUNT       128UL
 
-#define KRDMA_MAX_CQE           256UL
+#define KRDMA_MAX_CQE               256UL
 
-#define KRDMA_SEND_MSG_SIZE          4096UL
-#define KRDMA_RECV_MSG_SIZE          4096UL
-#define KRDMA_SEND_MSG_POOL_SIZE     128UL
-#define KRDMA_RECV_MSG_POOL_SIZE     128UL
+#define KRDMA_SEND_MSG_SIZE         4096UL
+#define KRDMA_RECV_MSG_SIZE         4096UL
+#define KRDMA_SEND_MSG_POOL_SIZE    128UL
+#define KRDMA_RECV_MSG_POOL_SIZE    128UL
+
+static const char * const wc_opcodes[] = {
+    [IB_WC_SEND]                    = "SEND",
+    [IB_WC_RDMA_WRITE]              = "RDMA_WRITE",
+    [IB_WC_RDMA_READ]               = "RDMA_READ",
+    [IB_WC_COMP_SWAP]               = "COMP_SWAP",
+    [IB_WC_FETCH_ADD]               = "FETCH_ADD",
+    [IB_WC_LSO]                     = "LSO",
+    [IB_WC_LOCAL_INV]               = "LOCAL_INV",
+    [IB_WC_REG_MR]                  = "REG_MR",
+    [IB_WC_MASKED_COMP_SWAP]        = "MASKED_COMP_SWAP",
+    [IB_WC_MASKED_FETCH_ADD]        = "MASKED_FETCH_ADD",
+    [IB_WC_RECV]                    = "RECV",
+    [IB_WC_RECV_RDMA_WITH_IMM]      = "RECV_RDMA_WITH_IMM",
+};
+
+enum krdma_recv_type {
+    KRDMA_RPC_REQUEST,
+    KRDMA_RPC_RESPONSE
+};
+
+struct krdma_rpc {
+    u32 id;
+    u32 type;
+    u32 send_completion;
+    u32 recv_completion;
+    u64 send_ptr;
+    u64 recv_ptr;
+    u64 payload;
+};
 
 struct krdma_msg {
     struct list_head lh;
