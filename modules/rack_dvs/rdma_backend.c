@@ -226,18 +226,6 @@ static int __init rack_dvs_rdma_init(void)
         goto out_free_nodes;
     }
 
-    ret = dvs_test_single_thread_correctness(64, 1);
-    if (ret)
-        pr_info("dvs_test_single_thread_correctness (64, 1): FAIL\n");
-    else
-        pr_info("dvs_test_single_thread_correctness (64, 1): SUCCESS\n");
-
-    ret = dvs_test_single_thread_correctness(1024, 64);
-    if (ret)
-        pr_info("dvs_test_single_thread_correctness (1024, 64): FAIL\n");
-    else
-        pr_info("dvs_test_single_thread_correctness (1024, 64): SUCCESS\n");
-
     ret = dvs_test_single_thread_correctness(8192, 64);
     if (ret)
         pr_info("dvs_test_single_thread_correctness (8192, 64): FAIL\n");

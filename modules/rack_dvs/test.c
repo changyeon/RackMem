@@ -9,7 +9,8 @@ extern int g_debug;
 
 int dvs_test_single_thread_correctness(u64 size_mb, u64 slab_mb)
 {
-    u64 size_bytes = size_mb * MB, slab_size_bytes = slab_mb * MB;
+    u64 size_bytes = size_mb * MB;
+    u64 slab_size_bytes = slab_mb * MB;
     u64 i, n, offset;
     int ret = 0;
     struct rack_dvs_region *region;
