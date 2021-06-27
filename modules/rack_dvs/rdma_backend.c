@@ -192,6 +192,7 @@ static int __init rack_dvs_rdma_init(void)
     int i, n, ret = 0;
     struct krdma_conn *nodes[32];
     struct rdma_node *node, *next;
+    u64 size_mb, slab_mb;
 
     n = krdma_get_all_nodes(nodes, 32);
     if (n == 0) {
@@ -226,11 +227,15 @@ static int __init rack_dvs_rdma_init(void)
         goto out_free_nodes;
     }
 
-    ret = dvs_test_single_thread_correctness(8192, 64);
+    size_mb = 256;
+    slab_mb = 64;
+    ret = dvs_test_single_thread_correctness(size_mb, slab_mb);
     if (ret)
-        pr_info("dvs_test_single_thread_correctness (8192, 64): FAIL\n");
+        pr_info("dvs_test_single_thread_correctness (%llu, %llu): FAIL\n",
+                size_mb, slab_mb);
     else
-        pr_info("dvs_test_single_thread_correctness (8192, 64): SUCCESS\n");
+        pr_info("dvs_test_single_thread_correctness (%llu, %llu): SUCCESS\n",
+                size_mb, slab_mb);
 
     pr_info("rack_dvs_rdma: module loaded\n");
 

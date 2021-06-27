@@ -37,13 +37,21 @@ int dvs_test_single_thread_correctness(u64 size_mb, u64 slab_mb)
         goto out_free_buf;
     }
 
-    get_random_bytes(buf, size_bytes);
+    n = (size_bytes) / PAGE_SIZE;
+    for (i = 0; i < n; i++) {
+        offset = i * PAGE_SIZE;
+        get_random_bytes(buf + offset, PAGE_SIZE);
+    }
     memcpy(tmp, buf, size_bytes);
 
-    ret = memcmp(buf, tmp, size_bytes);
-    if (ret != 0) {
-        pr_err("memcmp failed - #1\n");
-        goto out_free_tmp;
+    n = (size_bytes) / PAGE_SIZE;
+    for (i = 0; i < n; i++) {
+        offset = i * PAGE_SIZE;
+        ret = memcmp(buf + offset, tmp + offset, PAGE_SIZE);
+        if (ret != 0) {
+            pr_err("memcmp fail #1:    %llu/%llu\n", i, n);
+            ret = -EINVAL;
+        }
     }
 
     n = (size_bytes) / PAGE_SIZE;
@@ -52,15 +60,20 @@ int dvs_test_single_thread_correctness(u64 size_mb, u64 slab_mb)
         ret = rack_dvs_write(region, offset, PAGE_SIZE, buf + offset);
         if (ret) {
             pr_err("error on rack_dvs_write\n");
+            ret = -EINVAL;
             goto out_free_tmp;
         }
     }
     memset(buf, 0, size_bytes);
 
-    ret = memcmp(buf, tmp, size_bytes);
-    if (ret == 0) {
-        pr_err("memcmp failed - #2\n");
-        goto out_free_tmp;
+    n = (size_bytes) / PAGE_SIZE;
+    for (i = 0; i < n; i++) {
+        offset = i * PAGE_SIZE;
+        ret = memcmp(buf + offset, tmp + offset, PAGE_SIZE);
+        if (ret == 0) {
+            pr_err("memcmp fail #2:    %llu/%llu\n", i, n);
+            ret = -EINVAL;
+        }
     }
 
     n = (size_bytes) / PAGE_SIZE;
@@ -69,20 +82,24 @@ int dvs_test_single_thread_correctness(u64 size_mb, u64 slab_mb)
         ret = rack_dvs_read(region, offset, PAGE_SIZE, buf + offset);
         if (ret) {
             pr_err("error on rack_dvs_read\n");
+            ret = -EINVAL;
             goto out_free_tmp;
         }
     }
-
 
     n = (size_bytes) / PAGE_SIZE;
     for (i = 0; i < n; i++) {
         offset = i * PAGE_SIZE;
         ret = memcmp(buf + offset, tmp + offset, PAGE_SIZE);
-        if (ret != 0)
-            pr_err("memcmp fail:    %llu/%llu\n", i, n);
+        if (ret != 0) {
+            pr_err("memcmp fail #3:    %llu/%llu\n", i, n);
+            ret = -EINVAL;
+        }
     }
 
     rack_dvs_free_region(region);
+    vfree(tmp);
+    vfree(buf);
 
     return 0;
 

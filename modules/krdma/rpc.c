@@ -118,7 +118,7 @@ EXPORT_SYMBOL(krdma_alloc_remote_memory);
 
 static void alloc_remote_memory_rpc_handler(struct krdma_rpc_work *rpc_work)
 {
-    u32 ret = 0;
+    int ret = 0;
     struct krdma_conn *conn;
     struct krdma_msg *send_msg, *recv_msg;
     struct krdma_rpc *send_rpc, *recv_rpc;
@@ -149,7 +149,7 @@ static void alloc_remote_memory_rpc_handler(struct krdma_rpc_work *rpc_work)
 
     if (buf == NULL) {
         pr_err("failed to allocate memory for kmr buffer\n");
-        ret = ENOMEM;
+        ret = -ENOMEM;
     }
 
     DEBUG_LOG("[!!!] size: %llu, local buf: %llu, dma_addr: %llu\n", (u64) size, (u64) buf, dma_addr);

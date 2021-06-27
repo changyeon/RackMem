@@ -954,8 +954,6 @@ int krdma_connect(char *server, int port)
         goto out_destroy_cm_id;
     }
 
-    krdma_test_rpc_performance(conn, 8);
-
     return 0;
 
 out_destroy_cm_id:
