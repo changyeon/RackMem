@@ -51,7 +51,7 @@ static void test_rpc(struct krdma_conn *conn)
 
     /* Step 2: fill the message with the RPC request data */
     send_rpc = (struct krdma_rpc *) send_msg->buf;
-    send_rpc->id = 22419;
+    send_rpc->id = KRDMA_RPC_ID_DUMMY;
     send_rpc->type = KRDMA_RPC_REQUEST;
     send_rpc->send_completion = 0;
     send_rpc->recv_completion = 0;
@@ -503,15 +503,15 @@ static int established(struct krdma_conn *conn, bool server)
         goto out_destroy_recv_msg_pool;
     }
 
-    /* Step XXX: register RPC calls */
-
-    /* Step XXX: Handshake before using RPCs */
+    /* Step 7: Handshake for the QP connection, it may not be necessary. */
     ret = handshake(conn, server);
     if (ret) {
         pr_err("error on handshake_client\n");
         goto out;
     }
 
+    /* TODO: remove it later */
+    /* Step 8: RPC test. */
     {
         int ii, nn = 10;
         ktime_t t1, t2;
@@ -525,7 +525,7 @@ static int established(struct krdma_conn *conn, bool server)
         }
     }
 
-    /* Step 7: add the connection to the hash table */
+    /* Step 9: add the connection to the hash table */
     spin_lock(&conn_ht_lock);
     hash_add(conn_ht, &conn->hn, conn->nodehash);
     spin_unlock(&conn_ht_lock);

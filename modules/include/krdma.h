@@ -35,10 +35,8 @@ static const char * const wc_opcodes[] = {
     [IB_WC_RECV_RDMA_WITH_IMM]      = "RECV_RDMA_WITH_IMM",
 };
 
-struct krdma_rpc_work {
-    struct krdma_conn *conn;
-    struct krdma_msg *recv_msg;
-    struct work_struct ws;
+enum krdma_rpc_id {
+    KRDMA_RPC_ID_DUMMY              = 0xAAAA0000,
 };
 
 enum krdma_recv_type {
@@ -74,6 +72,19 @@ struct krdma_msg_pool {
     spinlock_t lock;
 };
 
+struct krdma_rpc_work {
+    struct krdma_conn *conn;
+    struct krdma_msg *recv_msg;
+    struct work_struct ws;
+};
+
+struct krdma_rpc_func {
+    struct hlist_node hn;
+    u32 id;
+    void (*func)(struct krdma_rpc_work *, void *);
+    void *ctx;
+};
+
 struct krdma_qp {
     struct ib_qp *qp;
     struct ib_cq *cq;
@@ -105,5 +116,7 @@ struct krdma_msg_pool *krdma_msg_pool_create(struct krdma_conn *conn, unsigned l
 void krdma_msg_pool_destroy(struct krdma_msg_pool *pool);
 struct krdma_msg *krdma_msg_pool_get(struct krdma_msg_pool *pool);
 void krdma_msg_pool_put(struct krdma_msg_pool *pool, struct krdma_msg *msg);
+int krdma_rpc_register(u32 id, void (*func)(struct krdma_rpc_work *, void *), void *ctx);
+void krdma_rpc_unregister(u32 id);
 
 #endif /* _INCLUDE_KRDMA_H_ */

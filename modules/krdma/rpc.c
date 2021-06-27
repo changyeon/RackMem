@@ -15,10 +15,13 @@ extern int g_debug;
 
 struct kmem_cache *rpc_work_cache;
 
-static void process_rpc(struct work_struct *ws)
+/* conn hash table */
+static DEFINE_SPINLOCK(rpc_ht_lock);
+static DEFINE_HASHTABLE(rpc_ht, 10);
+
+static void dummy_rpc_handler(struct krdma_rpc_work *rpc_work, void *ctx)
 {
     int ret;
-    struct krdma_rpc_work *rpc_work;
     struct krdma_conn *conn;
     struct krdma_msg *send_msg, *recv_msg;
     struct krdma_rpc *send_rpc, *recv_rpc;
@@ -26,7 +29,6 @@ static void process_rpc(struct work_struct *ws)
     const struct ib_recv_wr *bad_recv_wr;
     volatile u32 *send_completion;
 
-    rpc_work = container_of(ws, struct krdma_rpc_work, ws);
     conn = rpc_work->conn;
     recv_msg = rpc_work->recv_msg;
     recv_rpc = (struct krdma_rpc *) recv_msg->buf;
@@ -84,14 +86,109 @@ out:
     return;
 }
 
+int krdma_rpc_register(u32 id, void (*func)(struct krdma_rpc_work *, void *),
+                       void *ctx)
+{
+    int ret;
+    struct krdma_rpc_func *rpc_func;
+
+    DEBUG_LOG("krdma_rpc_register id: %u, func: %p\n", id, func);
+
+    rpc_func = kzalloc(sizeof(*rpc_func), GFP_KERNEL);
+    if (rpc_func == NULL) {
+        pr_err("failed to allocate memory for krdma_rpc_func\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    rpc_func->id = id;
+    rpc_func->func = func;
+    rpc_func->ctx = ctx;
+
+    spin_lock(&rpc_ht_lock);
+    hash_add(rpc_ht, &rpc_func->hn, rpc_func->id);
+    spin_unlock(&rpc_ht_lock);
+
+    return 0;
+
+out:
+    return ret;
+}
+EXPORT_SYMBOL(krdma_rpc_register);
+
+void krdma_rpc_unregister(u32 id)
+{
+    struct krdma_rpc_func *curr;
+
+    DEBUG_LOG("krdma_unregister_rpc id: %u\n", id);
+
+    spin_lock(&rpc_ht_lock);
+    hash_for_each_possible(rpc_ht, curr, hn, id) {
+        if (curr->id == id) {
+            hash_del(&curr->hn);
+            kfree(curr);
+            break;
+        }
+    }
+    spin_unlock(&rpc_ht_lock);
+}
+EXPORT_SYMBOL(krdma_rpc_unregister);
+
+static void krdma_free_rpc_table(void)
+{
+    int i = 0;
+    struct hlist_node *tmp;
+    struct krdma_rpc_func *curr;
+
+    DEBUG_LOG("krdma_free_rpc_table\n");
+
+    spin_lock(&rpc_ht_lock);
+    hash_for_each_safe(rpc_ht, i, tmp, curr, hn) {
+        hash_del(&curr->hn);
+        kfree(curr);
+    }
+    spin_unlock(&rpc_ht_lock);
+}
+
+/* We process the RPC request in a separate task */
+static void process_rpc_request(struct work_struct *ws)
+{
+    u32 id;
+    struct krdma_rpc_func *curr;
+    struct krdma_rpc_work *rpc_work;
+
+    rpc_work = container_of(ws, struct krdma_rpc_work, ws);
+
+    id = ((struct krdma_rpc *) rpc_work->recv_msg->buf)->id;
+
+    spin_lock(&rpc_ht_lock);
+    hash_for_each_possible(rpc_ht, curr, hn, id)
+        if (curr->id == id)
+            break;
+    spin_unlock(&rpc_ht_lock);
+
+    if (curr->id != id) {
+        pr_err("failed to lookup the RPC id in the table: %u\n", id);
+        goto out;
+    }
+
+    /* process the RPC request */
+    DEBUG_LOG("process_rpc_request: %u\n", id);
+    curr->func(rpc_work, curr->ctx);
+
+out:
+    return;
+}
+
 static void rpc_work_constructor(void *data)
 {
     struct krdma_rpc_work *rpc_work = (struct krdma_rpc_work *) data;
     rpc_work->conn = NULL;
     rpc_work->recv_msg = NULL;
-    INIT_WORK(&rpc_work->ws, process_rpc);
+    INIT_WORK(&rpc_work->ws, process_rpc_request);
 }
 
+/* We handle the RPC response in the context of the CQ completion handler */
 static void process_rpc_response(struct krdma_msg *recv_msg)
 {
     struct krdma_msg *send_msg;
@@ -358,13 +455,27 @@ int krdma_rpc_setup(void)
         goto out;
     }
 
+    ret = krdma_rpc_register(KRDMA_RPC_ID_DUMMY, dummy_rpc_handler, NULL);
+    if (ret) {
+        pr_err("failed to register rpc\n");
+        goto out_destroy_rpc_work_cache;
+    }
+
     return 0;
 
+/*
+ *out_free_rpc_table:
+ *    krdma_free_rpc_table();
+ */
+out_destroy_rpc_work_cache:
+    kmem_cache_destroy(rpc_work_cache);
 out:
+    kmem_cache_destroy(rpc_work_cache);
     return ret;
 }
 
 void krdma_rpc_cleanup(void)
 {
     kmem_cache_destroy(rpc_work_cache);
+    krdma_free_rpc_table();
 }
