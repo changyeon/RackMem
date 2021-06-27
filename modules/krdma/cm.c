@@ -926,6 +926,12 @@ int krdma_setup(char *server, int port)
         goto out_destroy_cm_id;
     }
 
+    ret = krdma_rpc_setup();
+    if (ret) {
+        pr_err("error on krdma_rpc_setup\n");
+        goto out_destroy_cm_id;
+    }
+
     DEBUG_LOG("krdma_setup, server_cm_id: %p\n", server_cm_id);
 
     return 0;
@@ -968,6 +974,7 @@ void krdma_cleanup(void)
     while (live_connections() > 0)
         udelay(1000);
 
+    krdma_rpc_cleanup();
     rdma_destroy_id(server_cm_id);
     ib_dealloc_pd(global_pd);
     ib_unregister_client(&krdma_ib_client);

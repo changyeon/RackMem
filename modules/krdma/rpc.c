@@ -13,14 +13,22 @@ extern int g_debug;
 
 #define DEBUG_LOG if (g_debug) pr_info
 
-static void process_rpc_request(struct krdma_conn *conn, struct krdma_msg *recv_msg)
+struct kmem_cache *rpc_work_cache;
+
+static void process_rpc(struct work_struct *ws)
 {
     int ret;
-    struct krdma_msg *send_msg;
+    struct krdma_rpc_work *rpc_work;
+    struct krdma_conn *conn;
+    struct krdma_msg *send_msg, *recv_msg;
     struct krdma_rpc *send_rpc, *recv_rpc;
     const struct ib_send_wr *bad_send_wr;
     const struct ib_recv_wr *bad_recv_wr;
+    volatile u32 *send_completion;
 
+    rpc_work = container_of(ws, struct krdma_rpc_work, ws);
+    conn = rpc_work->conn;
+    recv_msg = rpc_work->recv_msg;
     recv_rpc = (struct krdma_rpc *) recv_msg->buf;
 
     /* Step 1: process the RPC request */
@@ -48,29 +56,43 @@ static void process_rpc_request(struct krdma_conn *conn, struct krdma_msg *recv_
     ((unsigned long *) &send_rpc->payload)[3] = 2;
     ((unsigned long *) &send_rpc->payload)[4] = 1;
 
+    /* Step 3: post send */
     ret = ib_post_send(conn->rpc_qp.qp, &send_msg->send_wr, &bad_send_wr);
     if (ret) {
         pr_err("error on ib_post_send: %d\n", ret);
         goto out;
     }
 
-    /* Step XXX: post receive */
+    /* Step 4: poll send completion */
+    send_completion = &send_rpc->send_completion;
+    while ((*send_completion) == 0);
+
+out:
+    /* Step 5: post the recv message */
     ret = ib_post_recv(conn->rpc_qp.qp, &recv_msg->recv_wr, &bad_recv_wr);
     if (ret) {
         pr_err("error on ib_post_recv: %d\n", ret);
         goto out;
     }
 
-    /* TODO: poll the send completion */
+    /* Step 6: put the send message */
+    krdma_msg_pool_put(conn->send_msg_pool, send_msg);
 
-    /* TODO: add the send message to the pool */
+    /* Step 7: put the rpc_work to the cache */
+    kmem_cache_free(rpc_work_cache, rpc_work);
 
-out:
     return;
 }
 
-static void process_rpc_response(struct krdma_conn *conn,
-                                 struct krdma_msg *recv_msg)
+static void rpc_work_constructor(void *data)
+{
+    struct krdma_rpc_work *rpc_work = (struct krdma_rpc_work *) data;
+    rpc_work->conn = NULL;
+    rpc_work->recv_msg = NULL;
+    INIT_WORK(&rpc_work->ws, process_rpc);
+}
+
+static void process_rpc_response(struct krdma_msg *recv_msg)
 {
     struct krdma_msg *send_msg;
     struct krdma_rpc *send_rpc, *recv_rpc;
@@ -88,6 +110,7 @@ static void process_rpc_response(struct krdma_conn *conn,
 
 static void process_completion(struct krdma_conn *conn, struct ib_wc *wc)
 {
+    struct krdma_rpc_work *rpc_work;
     struct krdma_msg *msg = (struct krdma_msg *) wc->wr_id;
     struct krdma_rpc *rpc = (struct krdma_rpc *) msg->buf;
 
@@ -112,10 +135,17 @@ static void process_completion(struct krdma_conn *conn, struct ib_wc *wc)
     case IB_WC_RECV:
         if (rpc->type == KRDMA_RPC_REQUEST) {
             DEBUG_LOG("process_rpc_request\n");
-            process_rpc_request(conn, msg);
+            rpc_work = kmem_cache_alloc(rpc_work_cache, GFP_KERNEL);
+            if (rpc_work == NULL) {
+                pr_err("failed to get a rpc_work from the cache\n");
+                goto out;
+            }
+            rpc_work->conn = conn;
+            rpc_work->recv_msg = msg;
+            schedule_work(&rpc_work->ws);
         } else if (rpc->type == KRDMA_RPC_RESPONSE) {
             DEBUG_LOG("process_rpc_response\n");
-            process_rpc_response(conn, msg);
+            process_rpc_response(msg);
         } else {
             pr_err("unexpected recv message type: %u\n", rpc->type);
         }
@@ -312,4 +342,29 @@ void krdma_msg_pool_put(struct krdma_msg_pool *pool, struct krdma_msg *msg)
     list_add_tail(&msg->lh, &pool->lh);
     pool->size++;
     spin_unlock(&pool->lock);
+}
+
+int krdma_rpc_setup(void)
+{
+    int ret, flags;
+
+    flags = 0;
+    rpc_work_cache = kmem_cache_create(
+            "rpc_work", sizeof(struct krdma_rpc_work),
+            __alignof__(struct krdma_rpc_work), 0, rpc_work_constructor);
+    if (rpc_work_cache == NULL) {
+        pr_err("failed to create a kmem_cache for rpc_work\n");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    return 0;
+
+out:
+    return ret;
+}
+
+void krdma_rpc_cleanup(void)
+{
+    kmem_cache_destroy(rpc_work_cache);
 }

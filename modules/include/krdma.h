@@ -3,6 +3,7 @@
 
 #include <rdma/rdma_cm.h>
 #include <linux/utsname.h>
+#include <linux/workqueue.h>
 
 #define KRDMA_MAX_SEND_WR           128UL
 #define KRDMA_MAX_RECV_WR           128UL
@@ -32,6 +33,12 @@ static const char * const wc_opcodes[] = {
     [IB_WC_MASKED_FETCH_ADD]        = "MASKED_FETCH_ADD",
     [IB_WC_RECV]                    = "RECV",
     [IB_WC_RECV_RDMA_WITH_IMM]      = "RECV_RDMA_WITH_IMM",
+};
+
+struct krdma_rpc_work {
+    struct krdma_conn *conn;
+    struct krdma_msg *recv_msg;
+    struct work_struct ws;
 };
 
 enum krdma_recv_type {
