@@ -265,7 +265,7 @@ static void reclaim_active_pages(struct work_struct *ws)
 {
     struct rack_vm_work *work;
     struct rack_vm_region *region;
-    int i, ret;
+    int i, ret, n;
     struct rack_vm_page *rpage;
 
     work = container_of(ws, struct rack_vm_work, ws);
@@ -273,7 +273,8 @@ static void reclaim_active_pages(struct work_struct *ws)
 
     count_event(region, RACK_VM_EVENT_BG_RECLAIM_TASK);
 
-    for (i = 0; i < 16384; i++) {
+    n = atomic64_read(&region->page_count_limit) / 100;
+    for (i = 0; i < n; i++) {
         rpage = rack_vm_page_list_pop(&region->active_list);
         if (rpage == NULL) {
             pr_err("failed to reclaim a page from active_list\n");

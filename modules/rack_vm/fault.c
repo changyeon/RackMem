@@ -94,8 +94,11 @@ void rack_vm_close(struct vm_area_struct *vma)
 
 static inline void background_reclaim(struct rack_vm_region *region)
 {
+    /* threshold == 0.25% */
+    s64 threshold = atomic64_read(&region->page_count_limit) / 400;
+
     if (region->full)
-        if (rack_vm_page_list_size(&region->inactive_list) < 1024)
+        if (rack_vm_page_list_size(&region->inactive_list) < threshold)
             schedule_work(&region->reclaim_work.ws);
 }
 
