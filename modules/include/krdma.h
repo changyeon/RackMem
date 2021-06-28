@@ -114,6 +114,7 @@ int krdma_poll_cq_one(struct ib_cq *cq);
 #define krdma_write(conn, kmr, addr, offset, length) \
     krdma_io(conn, kmr, addr, offset, length, WRITE)
 int krdma_io(struct krdma_conn *conn, struct krdma_mr *kmr, dma_addr_t addr, u64 offset, u64 length, int dir);
+int krdma_io_async(struct krdma_conn *conn, struct krdma_mr *kmr, struct ib_rdma_wr *wr, struct ib_sge *sgl, dma_addr_t addr, u64 offset, u64 length, int dir, u64 *completion);
 
 /*
  * CM related

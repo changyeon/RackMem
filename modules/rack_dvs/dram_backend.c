@@ -129,11 +129,13 @@ static int __init rack_dvs_dram_init(void)
         goto out;
     }
 
-    ret = dvs_test_single_thread_correctness(64, 1);
-    if (ret)
-        pr_info("dvs_test_single_thread_correctness (64, 1): FAIL\n");
-    else
-        pr_info("dvs_test_single_thread_correctness (64, 1): SUCCESS\n");
+    /*
+     *ret = dvs_test_single_thread_correctness(64, 1);
+     *if (ret)
+     *    pr_info("dvs_test_single_thread_correctness (64, 1): FAIL\n");
+     *else
+     *    pr_info("dvs_test_single_thread_correctness (64, 1): SUCCESS\n");
+     */
 
     pr_info("rack_dvs_dram: module loaded\n");
 

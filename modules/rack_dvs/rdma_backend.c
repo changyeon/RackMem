@@ -1,6 +1,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
+#include <linux/delay.h>
 #include <krdma.h>
 #include <rack_dvs.h>
 
@@ -12,6 +13,14 @@ int g_debug = 0;
 module_param_named(debug, g_debug, int, 0);
 MODULE_PARM_DESC(debug, "enable debug mode");
 
+int g_backup = 0;
+module_param_named(backup, g_backup, int, 0);
+MODULE_PARM_DESC(backup, "enable local storage backup");
+
+int g_backup_storage_delay = 10;
+module_param_named(backup_storage_delay, g_backup_storage_delay, int, 0);
+MODULE_PARM_DESC(backup_storage, "microsecond delay for the emulated storage");
+
 #define DEBUG_LOG if (g_debug) pr_info
 
 struct rdma_node {
@@ -20,6 +29,8 @@ struct rdma_node {
 };
 
 struct rdma_slab {
+    bool backup;
+    void *local_storage;
     struct krdma_mr *kmr;
 };
 
@@ -91,11 +102,21 @@ static struct dvs_slab *rdma_alloc(u64 size)
        goto out_kfree_dvs_slab;
     }
 
+    rdma_slab->backup = g_backup;
+
+    if (rdma_slab->backup) {
+        rdma_slab->local_storage = vzalloc(size);
+        if (rdma_slab->local_storage == NULL) {
+            pr_err("failed to allocate emulated storage for the slab\n");
+            goto out_kfree_rdma_slab;
+        }
+    }
+
     rdma_slab->kmr = krdma_alloc_remote_memory(node->conn, size);
     if (rdma_slab->kmr == NULL) {
         pr_err("error on krdma_alloc_remote_memory\n");
         ret = -ENOMEM;
-        goto out_kfree_rdma_slab;
+        goto out_free_local_storage;
     }
 
     INIT_LIST_HEAD(&dvs_slab->lh);
@@ -104,6 +125,9 @@ static struct dvs_slab *rdma_alloc(u64 size)
 
     return dvs_slab;
 
+out_free_local_storage:
+    if (rdma_slab->local_storage)
+        vfree(rdma_slab->local_storage);
 out_kfree_rdma_slab:
     kfree(rdma_slab);
 out_kfree_dvs_slab:
@@ -120,6 +144,8 @@ static void rdma_free(struct dvs_slab *slab)
 
     rdma_slab = (struct rdma_slab *) slab->private;
     krdma_free_remote_memory(rdma_slab->kmr->conn, rdma_slab->kmr);
+    if (rdma_slab->backup)
+        vfree(rdma_slab->local_storage);
     kfree(rdma_slab);
 }
 
@@ -161,7 +187,10 @@ static int rdma_write(struct dvs_slab *slab, u64 offset, u64 size, void *src)
     struct rdma_slab *rdma_slab;
     struct krdma_conn *conn;
     struct krdma_mr *kmr;
+    struct ib_rdma_wr wr;
+    struct ib_sge sgl;
     dma_addr_t addr;
+    u64 completion;
 
     DEBUG_LOG("rdma_write slab: %p, offset: %llu, size: %llu, dst: %p\n",
               slab, offset, size, src);
@@ -175,11 +204,28 @@ static int rdma_write(struct dvs_slab *slab, u64 offset, u64 size, void *src)
     else
         addr = virt_to_phys(src);
 
-    ret = krdma_io(conn, kmr, addr, offset, size, WRITE);
+    /* Do async write here */
+    ret = krdma_io_async(conn, kmr, &wr, &sgl, addr, offset, size, WRITE,
+                         &completion);
     if (ret) {
         pr_err("error on krdma_io\n");
         goto out;
     }
+
+    /* make a backup if the flag is on */
+    if (rdma_slab->backup) {
+        memcpy((void *) (rdma_slab->local_storage + offset), src, size);
+        if (g_backup_storage_delay > 0)
+            udelay(g_backup_storage_delay);
+    }
+
+    /* check the I/O completion */
+    ret = krdma_poll_completion(conn->rdma_qp.cq, &completion);
+    if (ret) {
+        pr_err("error on krdma_poll_cq\n");
+        goto out;
+    }
+
 
     return 0;
 
@@ -229,13 +275,15 @@ static int __init rack_dvs_rdma_init(void)
 
     size_mb = 256;
     slab_mb = 64;
-    ret = dvs_test_single_thread_correctness(size_mb, slab_mb);
-    if (ret)
-        pr_info("dvs_test_single_thread_correctness (%llu, %llu): FAIL\n",
-                size_mb, slab_mb);
-    else
-        pr_info("dvs_test_single_thread_correctness (%llu, %llu): SUCCESS\n",
-                size_mb, slab_mb);
+    /*
+     *ret = dvs_test_single_thread_correctness(size_mb, slab_mb);
+     *if (ret)
+     *    pr_info("dvs_test_single_thread_correctness (%llu, %llu): FAIL\n",
+     *            size_mb, slab_mb);
+     *else
+     *    pr_info("dvs_test_single_thread_correctness (%llu, %llu): SUCCESS\n",
+     *            size_mb, slab_mb);
+     */
 
     pr_info("rack_dvs_rdma: module loaded\n");
 
