@@ -17,6 +17,10 @@ int g_debug = 0;
 module_param_named(debug, g_debug, int, 0);
 MODULE_PARM_DESC(debug, "enable debug mode");
 
+int g_bg_reclaim = 0;
+module_param_named(bg_reclaim, g_bg_reclaim, int, 0);
+MODULE_PARM_DESC(bg_reclaim, "enable background page reclamation");
+
 int g_page_size = PAGE_SIZE;
 module_param_named(page_size, g_page_size, int, 0);
 MODULE_PARM_DESC(page_size, "RackVM page size");

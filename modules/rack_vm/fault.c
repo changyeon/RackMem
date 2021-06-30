@@ -10,6 +10,7 @@
 #include "debugfs.h"
 
 extern int g_debug;
+extern int g_bg_reclaim;
 extern int g_page_size;
 extern int g_slab_size_bytes;
 
@@ -97,7 +98,7 @@ static inline void background_reclaim(struct rack_vm_region *region)
     /* threshold == 0.25% */
     s64 threshold = atomic64_read(&region->page_count_limit) / 400;
 
-    if (region->full)
+    if (g_bg_reclaim && region->full)
         if (rack_vm_page_list_size(&region->inactive_list) < threshold)
             schedule_work(&region->reclaim_work.ws);
 }
