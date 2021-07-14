@@ -65,6 +65,7 @@ static struct dvs_slab *dram_alloc(u64 size)
     INIT_LIST_HEAD(&dvs_slab->lh);
     dvs_slab->dev = &dram_dev;
     dvs_slab->private = (void *) dram_slab;
+    dvs_slab->ref = 0;
 
     return dvs_slab;
 

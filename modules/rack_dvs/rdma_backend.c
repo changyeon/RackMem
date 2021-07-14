@@ -122,6 +122,7 @@ static struct dvs_slab *rdma_alloc(u64 size)
     INIT_LIST_HEAD(&dvs_slab->lh);
     dvs_slab->dev = &rdma_dev;
     dvs_slab->private = (void *) rdma_slab;
+    dvs_slab->ref = 0;
 
     return dvs_slab;
 

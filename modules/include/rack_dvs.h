@@ -18,6 +18,7 @@ enum rack_dvs_event {
     RACK_DVS_EVENT_GET_SLAB_FAST,
     RACK_DVS_EVENT_GET_SLAB_SLOW,
     RACK_DVS_EVENT_UPDATE_SLAB_POOL,
+    RACK_DVS_EVENT_RECLAIM_SLAB,
     RACK_DVS_EVENT_SLAB_READ,
     RACK_DVS_EVENT_SLAB_WRITE,
     __NR_RACK_DVS_EVENTS
@@ -33,6 +34,7 @@ static const char * const rack_dvs_events[] = {
     [RACK_DVS_EVENT_GET_SLAB_FAST]              = "get_slab_fast",
     [RACK_DVS_EVENT_GET_SLAB_SLOW]              = "get_slab_slow",
     [RACK_DVS_EVENT_UPDATE_SLAB_POOL]           = "update_slab_pool",
+    [RACK_DVS_EVENT_RECLAIM_SLAB]               = "reclaim_slab",
     [RACK_DVS_EVENT_SLAB_READ]                  = "slab_read",
     [RACK_DVS_EVENT_SLAB_WRITE]                 = "slab_write",
 };
@@ -46,6 +48,7 @@ struct dvs_slab {
     struct list_head lh;
     struct rack_dvs_dev *dev;
     void *private;
+    int ref;
 };
 
 struct dvs_slab_pool {

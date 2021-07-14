@@ -19,6 +19,18 @@ MODULE_PARM_DESC(debug, "enable debug mode");
 static LIST_HEAD(dvs_dev_list);
 static DEFINE_SPINLOCK(dvs_dev_list_lock);
 
+static void reclaim_slab(struct rack_dvs_region *region, struct dvs_slab *slab)
+{
+    struct dvs_slab_pool *slab_pool = &region->slab_pool;
+
+    spin_lock(&slab_pool->lock);
+    list_add_tail(&slab->lh, &slab_pool->lh);
+    slab_pool->size++;
+    spin_unlock(&slab_pool->lock);
+
+    count_event(region, RACK_DVS_EVENT_RECLAIM_SLAB);
+}
+
 void update_slab_pool(struct work_struct *ws)
 {
     struct rack_dvs_region *region;
@@ -149,11 +161,13 @@ int rack_dvs_io(struct rack_dvs_region *region, u64 region_offset, u64 size,
     count_event(region, RACK_DVS_EVENT_GET_SLAB_SLOW);
 
 success:
+    slab = slot->slab;
+    if (dir == WRITE)
+        slab->ref++;
     spin_unlock(&slot->lock);
 
     check_and_update_slab_pool(region);
 
-    slab = slot->slab;
     if (dir == READ) {
         ret = slab->dev->dvs_ops->read(slab, slab_offset, size, buf);
         count_event(region, RACK_DVS_EVENT_SLAB_READ);
@@ -167,7 +181,18 @@ success:
         goto out;
     }
 
-    return 0;
+    if (dir == WRITE)
+        goto out;
+
+    spin_lock(&slot->lock);
+    slab->ref--;
+    /* NOTE: if the first I/O on this slab is READ, the ref count becomes -1 */
+    if (slab->ref <= 0) {
+        slot->slab = NULL;
+        slab->ref = 0;
+        reclaim_slab(region, slab);
+    }
+    spin_unlock(&slot->lock);
 
 out:
     return ret;
